@@ -65,6 +65,7 @@
 //! - Path validation (valley-free property, loop detection)
 //! - Integration with existing bgpsim event system
 
+pub mod beaconing;
 pub mod event;
 pub mod path_segment;
 pub mod pcb;
@@ -72,15 +73,10 @@ pub mod process;
 pub mod state;
 pub mod types;
 
-// Placeholder modules for future implementation
-pub mod beaconing {
-    //! Beaconing logic for core and intra-ISD path discovery.
-    //!
-    //! This module will contain the implementation of PCB generation,
-    //! propagation, selection, and storage.
-}
-
 // Re-export commonly used types
+pub use beaconing::{
+    create_initial_pcb, extend_pcb, validate_pcb, SelectionPolicy, SimpleSelectionPolicy,
+};
 pub use event::ScionEvent;
 pub use path_segment::{
     ForwardingPath, PathConstructionError, PathSegment, PathValidationError, PeeringShortcut,
@@ -88,6 +84,7 @@ pub use path_segment::{
 };
 pub use pcb::{
     AsEntry, HopEntry, HopField, Pcb, PcbExtensions, PcbValidationError, PeerEntry, SegmentInfo,
+    SegmentFlags,
 };
 pub use process::ScionControlService;
 pub use state::{BeaconStore, PathDatabase};
