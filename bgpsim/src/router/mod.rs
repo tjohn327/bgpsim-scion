@@ -60,6 +60,8 @@ pub struct Router<P: Prefix, Ospf = GlobalOspfProcess> {
     pub sr: SrProcess<P>,
     /// The BGP routing process
     pub bgp: BgpProcess<P>,
+    /// The SCION control service (optional, only present if SCION is enabled)
+    pub scion: Option<crate::scion::ScionControlService<P>>,
     /// Flag to tell if load balancing is enabled. If load balancing is enabled, then the router
     /// will load balance packets towards a destination if multiple paths exist with equal
     /// cost. load balancing will only work within OSPF. BGP Additional Paths is not yet
@@ -78,6 +80,7 @@ impl<P: Prefix, Ospf> IntoIpv4Prefix for Router<P, Ospf> {
             ospf: self.ospf,
             sr: self.sr.into_ipv4_prefix(),
             bgp: self.bgp.into_ipv4_prefix(),
+            scion: None, // SCION doesn't use prefix types, so reset to None
             do_load_balancing: self.do_load_balancing,
         }
     }
@@ -92,6 +95,7 @@ impl<P: Prefix, Ospf: Clone> Clone for Router<P, Ospf> {
             ospf: self.ospf.clone(),
             sr: self.sr.clone(),
             bgp: self.bgp.clone(),
+            scion: self.scion.clone(),
             do_load_balancing: self.do_load_balancing,
         }
     }
@@ -139,6 +143,36 @@ impl<P: Prefix, Ospf> Router<P, Ospf> {
         std::mem::swap(&mut self.do_load_balancing, &mut do_load_balancing);
         do_load_balancing
     }
+
+    /// Get a reference to the SCION control service if enabled
+    pub fn scion(&self) -> Option<&crate::scion::ScionControlService<P>> {
+        self.scion.as_ref()
+    }
+
+    /// Get a mutable reference to the SCION control service if enabled
+    pub fn scion_mut(&mut self) -> Option<&mut crate::scion::ScionControlService<P>> {
+        self.scion.as_mut()
+    }
+
+    /// Check if SCION is enabled for this router
+    pub fn is_scion_enabled(&self) -> bool {
+        self.scion.is_some()
+    }
+
+    /// Enable SCION for this router with the given ISD-AS and core status
+    pub(crate) fn enable_scion(
+        &mut self,
+        isd_as: crate::scion::IsdAs,
+        is_core: bool,
+    ) -> Option<crate::scion::ScionControlService<P>> {
+        self.scion
+            .replace(crate::scion::ScionControlService::new(isd_as, is_core))
+    }
+
+    /// Disable SCION for this router
+    pub(crate) fn disable_scion(&mut self) -> Option<crate::scion::ScionControlService<P>> {
+        self.scion.take()
+    }
 }
 
 impl<P: Prefix, Ospf: OspfProcess> Router<P, Ospf> {
@@ -150,6 +184,7 @@ impl<P: Prefix, Ospf: OspfProcess> Router<P, Ospf> {
             ospf: Ospf::new(router_id),
             sr: SrProcess::new(),
             bgp: BgpProcess::new(router_id, asn),
+            scion: None, // SCION is disabled by default
             do_load_balancing: false,
         }
     }
@@ -301,6 +336,7 @@ impl<P: Prefix, Ospf: OspfProcess> Router<P, Ospf> {
                 ospf: Ospf2::new(self.router_id),
                 sr: self.sr,
                 bgp: self.bgp,
+                scion: self.scion,
                 do_load_balancing: self.do_load_balancing,
             },
             self.ospf,
