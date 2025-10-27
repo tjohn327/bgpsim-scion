@@ -233,6 +233,7 @@ pub mod record;
 pub mod route_map;
 pub mod router;
 pub mod scion;
+pub mod scion_network;
 pub mod serde;
 #[cfg(feature = "topology_zoo")]
 #[cfg_attr(docsrs, doc(cfg(feature = "topology_zoo")))]

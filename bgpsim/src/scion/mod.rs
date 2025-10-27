@@ -73,9 +73,13 @@ pub mod process;
 pub mod state;
 pub mod types;
 
+#[cfg(test)]
+mod integration_tests;
+
 // Re-export commonly used types
 pub use beaconing::{
-    create_initial_pcb, extend_pcb, validate_pcb, SelectionPolicy, SimpleSelectionPolicy,
+    add_peering_entries, create_initial_pcb, extend_pcb, select_for_propagation, validate_pcb,
+    SelectionPolicy, SimpleSelectionPolicy,
 };
 pub use event::ScionEvent;
 pub use path_segment::{

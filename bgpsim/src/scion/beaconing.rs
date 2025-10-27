@@ -21,7 +21,7 @@
 use crate::types::Prefix;
 
 use super::{
-    pcb::{AsEntry, HopEntry, HopField, Pcb, SegmentFlags, SegmentInfo},
+    pcb::{AsEntry, HopEntry, HopField, Pcb, PeerEntry, SegmentFlags, SegmentInfo},
     types::{InterfaceId, IsdAs},
 };
 
@@ -200,6 +200,73 @@ pub fn validate_pcb<P: Prefix>(
     Ok(())
 }
 
+/// Extend a PCB with peering information.
+///
+/// When an AS has peering links, it can add peer entries to the PCB
+/// so that downstream ASes are aware of potential path shortcuts.
+///
+/// # Arguments
+/// * `pcb` - The PCB to extend (will be modified in place after cloning)
+/// * `peering_links` - Vector of peering link information (peer ISD-AS, interface IDs, MTU)
+/// * `timestamp` - Current simulation timestamp
+///
+/// # Returns
+/// The PCB with peer entries added to the last AS entry
+pub fn add_peering_entries<P: Prefix>(
+    mut pcb: Pcb<P>,
+    peering_links: Vec<(IsdAs, InterfaceId, InterfaceId, u16)>, // (peer_isd_as, local_if, peer_if, mtu)
+    timestamp: u32,
+) -> Pcb<P> {
+    if let Some(last_entry) = pcb.as_entries.last_mut() {
+        for (peer_isd_as, local_if, peer_if, mtu) in peering_links {
+            // Create hop field for the peering link
+            let hop_field = HopField {
+                ingress: local_if,
+                egress: peer_if,
+                exp_time: 63,
+                mac: generate_mac(peer_isd_as, local_if, timestamp),
+            };
+
+            let peer_entry = PeerEntry::new(peer_isd_as, peer_if, mtu, hop_field);
+            last_entry.add_peer_entry(peer_entry);
+        }
+    }
+
+    pcb
+}
+
+/// Select PCBs for propagation to children or peers.
+///
+/// Uses a selection policy to choose which PCBs to propagate downstream.
+/// This helps manage the number of beacons in the network and focus on
+/// diverse/high-quality paths.
+///
+/// # Arguments
+/// * `pcbs` - Available PCBs from beacon store
+/// * `policy` - Selection policy to use
+/// * `max_count` - Maximum number of PCBs to select
+///
+/// # Returns
+/// Selected PCBs to propagate
+pub fn select_for_propagation<P: Prefix>(
+    pcbs: &[Pcb<P>],
+    policy: &dyn SelectionPolicy<P>,
+    max_count: usize,
+) -> Vec<Pcb<P>> {
+    if pcbs.is_empty() {
+        return Vec::new();
+    }
+
+    // Create references for the policy
+    let pcb_refs: Vec<&Pcb<P>> = pcbs.iter().collect();
+
+    // Use the policy to select indices
+    let selected_indices = policy.select_pcbs(&pcb_refs, max_count);
+
+    // Return clones of the selected PCBs
+    selected_indices.iter().map(|&idx| pcbs[idx].clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +416,88 @@ mod tests {
         // Request more than available
         let selected = policy.select_pcbs(&pcbs, 10);
         assert_eq!(selected.len(), 2); // Should return all available
+    }
+
+    #[test]
+    fn test_add_peering_entries() {
+        let isd_as1 = IsdAs::new(1, 110u64);
+        let isd_as2 = IsdAs::new(1, 120u64);
+
+        // Create a PCB
+        let pcb: Pcb<SimplePrefix> =
+            create_initial_pcb(isd_as1, 1000, InterfaceId(1), 1500);
+
+        // Add peering entries
+        let peering_links = vec![
+            (isd_as2, InterfaceId(5), InterfaceId(6), 1400),
+        ];
+
+        let pcb_with_peers = add_peering_entries(pcb, peering_links, 1000);
+
+        // Verify peer entry was added
+        assert_eq!(pcb_with_peers.as_entries.len(), 1);
+        let last_entry = pcb_with_peers.as_entries.last().unwrap();
+        assert_eq!(last_entry.peer_entries.len(), 1);
+        assert_eq!(last_entry.peer_entries[0].peer_isd_as, isd_as2);
+        assert_eq!(last_entry.peer_entries[0].peer_interface.0, 6);
+        assert_eq!(last_entry.peer_entries[0].peer_mtu, 1400);
+    }
+
+    #[test]
+    fn test_add_multiple_peering_entries() {
+        let isd_as1 = IsdAs::new(1, 110u64);
+        let isd_as2 = IsdAs::new(1, 120u64);
+        let isd_as3 = IsdAs::new(1, 130u64);
+
+        let pcb: Pcb<SimplePrefix> =
+            create_initial_pcb(isd_as1, 1000, InterfaceId(1), 1500);
+
+        // Add multiple peering entries
+        let peering_links = vec![
+            (isd_as2, InterfaceId(5), InterfaceId(6), 1400),
+            (isd_as3, InterfaceId(7), InterfaceId(8), 1300),
+        ];
+
+        let pcb_with_peers = add_peering_entries(pcb, peering_links, 1000);
+
+        // Verify both peer entries were added
+        let last_entry = pcb_with_peers.as_entries.last().unwrap();
+        assert_eq!(last_entry.peer_entries.len(), 2);
+        assert_eq!(last_entry.peer_entries[0].peer_isd_as, isd_as2);
+        assert_eq!(last_entry.peer_entries[1].peer_isd_as, isd_as3);
+    }
+
+    #[test]
+    fn test_select_for_propagation() {
+        let policy = SimpleSelectionPolicy;
+
+        // Create PCBs with different lengths
+        let pcb1: Pcb<SimplePrefix> =
+            create_initial_pcb(IsdAs::new(1, 110u64), 1000, InterfaceId(1), 1500);
+
+        let pcb2 = extend_pcb(
+            create_initial_pcb(IsdAs::new(1, 120u64), 1000, InterfaceId(1), 1500),
+            IsdAs::new(1, 130u64),
+            InterfaceId(2),
+            InterfaceId(3),
+            1500,
+            1000,
+        );
+
+        let pcbs = vec![pcb1.clone(), pcb2.clone()];
+
+        // Select 1 PCB - should select the shortest
+        let selected = select_for_propagation(&pcbs, &policy, 1);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path_length(), 1);
+    }
+
+    #[test]
+    fn test_select_for_propagation_empty() {
+        let policy = SimpleSelectionPolicy;
+        let pcbs: Vec<Pcb<SimplePrefix>> = vec![];
+
+        let selected = select_for_propagation(&pcbs, &policy, 5);
+        assert_eq!(selected.len(), 0);
     }
 }
