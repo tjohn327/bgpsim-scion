@@ -69,8 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run SCION protocols
     net.scion_core_beaconing(1000)?;           // Core beaconing at time 1000
-    net.scion_intra_isd_beaconing(1000, 5)?;   // Intra-ISD beaconing (5 best PCBs)
-    net.scion_registration_round(5)?;          // Register segments (5 best)
+    net.scion_intra_isd_beaconing(1000, 50)?;  // Intra-ISD beaconing (50 best PCBs - spec default)
+    net.scion_registration_round(50)?;         // Register segments (50 best - spec default)
 
     // Lookup paths
     let paths = net.scion_lookup_paths(leaf1, leaf2)?;
@@ -152,13 +152,13 @@ SCION uses periodic beaconing to disseminate path information:
 net.scion_core_beaconing(timestamp)?;
 
 // Step 2: Intra-ISD beaconing (propagate up to 5 best PCBs)
-net.scion_intra_isd_beaconing(timestamp, 5)?;
+net.scion_intra_isd_beaconing(timestamp, 50)?;
 
 // Step 3: Registration (register up to 5 best segments)
-net.scion_registration_round(5)?;
+net.scion_registration_round(50)?;
 
 // Or all in one:
-let (up_count, down_count, core_count) = net.scion_registration_round(5)?;
+let (up_count, down_count, core_count) = net.scion_registration_round(50)?;
 ```
 
 ## Basic Usage
@@ -194,7 +194,7 @@ net.scion_core_beaconing(1000)?;
 
 // Intra-ISD beaconing (down hierarchy)
 // Parameters: (timestamp, max_pcbs_per_interface)
-net.scion_intra_isd_beaconing(1000, 5)?;
+net.scion_intra_isd_beaconing(1000, 50)?;
 ```
 
 ### 4. Register Segments
@@ -202,7 +202,7 @@ net.scion_intra_isd_beaconing(1000, 5)?;
 ```rust
 // Register up/down/core segments
 // Parameter: max_segments_to_register
-let (up_count, down_count, core_count) = net.scion_registration_round(5)?;
+let (up_count, down_count, core_count) = net.scion_registration_round(50)?;
 println!("Registered: {} up, {} down, {} core", up_count, down_count, core_count);
 ```
 
@@ -308,7 +308,7 @@ net.configure_scion_link(core2, core3, ScionLinkType::Core)?;
 
 // Run beaconing
 net.scion_core_beaconing(1000)?;
-net.scion_registration_round(5)?;
+net.scion_registration_round(50)?;
 
 // Lookup paths across ISDs (ISD1 → ISD2 → ISD3)
 let paths = net.scion_lookup_paths(core1, core3)?;
@@ -345,8 +345,8 @@ println!("Cleaned up {} PCBs, {} segments", expired_pcbs, expired_segs);
 
 // Re-run beaconing to discover new paths
 net.scion_core_beaconing(current_time)?;
-net.scion_intra_isd_beaconing(current_time, 5)?;
-net.scion_registration_round(5)?;
+net.scion_intra_isd_beaconing(current_time, 50)?;
+net.scion_registration_round(50)?;
 
 // Lookup paths again (should find alternative routes)
 let new_paths = net.scion_lookup_paths(src, dst)?;
@@ -386,8 +386,8 @@ fn example_intra_isd() -> Result<(), NetworkError> {
 
     // Run protocols
     net.scion_core_beaconing(1000)?;
-    net.scion_intra_isd_beaconing(1000, 5)?;
-    net.scion_registration_round(5)?;
+    net.scion_intra_isd_beaconing(1000, 50)?;
+    net.scion_registration_round(50)?;
 
     // Lookup paths between leaves
     let paths = net.scion_lookup_paths(leaf1, leaf2)?;
@@ -429,8 +429,8 @@ fn example_multi_isd() -> Result<(), NetworkError> {
 
     // Run protocols
     net.scion_core_beaconing(1000)?;
-    net.scion_intra_isd_beaconing(1000, 5)?;
-    net.scion_registration_round(5)?;
+    net.scion_intra_isd_beaconing(1000, 50)?;
+    net.scion_registration_round(50)?;
 
     // Lookup inter-ISD paths
     let paths = net.scion_lookup_paths(leaf1, leaf2)?;
@@ -541,24 +541,57 @@ struct ForwardingPath<P> {
 
 ## Performance Tuning
 
+### Default Parameters (Spec-Recommended)
+
+bgpsim-scion uses defaults based on the official SCION specification
+(**draft-dekater-scion-controlplane-10**):
+
+```rust
+// Available as constants in bgpsim
+use bgpsim::DEFAULT_MAX_PCBS;           // 50
+use bgpsim::DEFAULT_MAX_CORE_PCBS;      // 5
+use bgpsim::DEFAULT_INTRA_ISD_INTERVAL; // 5 seconds
+use bgpsim::DEFAULT_CORE_INTERVAL;      // 60 seconds
+use bgpsim::DEFAULT_HOP_EXPIRATION;     // 21600 seconds (6 hours)
+```
+
+| Parameter | Default | Rationale |
+|-----------|---------|-----------|
+| `max_pcbs` | **50** | "At most 50 PCBs per child link" (spec line 1558) |
+| `max_core_pcbs` | **5** | "at most 5 path segments to every destination AS" |
+| `propagation_interval` | **5s (intra), 60s (core)** | Spec minimum values |
+| `hop_expiration` | **6 hours** | "SHOULD be around 6 hours" (spec) |
+
 ### Beaconing Parameters
 
 ```rust
-// More PCBs = better path diversity, but more overhead
+// Spec-recommended default (good path diversity + manageable overhead)
+net.scion_intra_isd_beaconing(timestamp, 50)?;  // Propagate 50 best (DEFAULT)
+
+// For testing/CI (faster, less diversity)
 net.scion_intra_isd_beaconing(timestamp, 10)?;  // Propagate 10 best
 
-// Fewer PCBs = less overhead, still good diversity
-net.scion_intra_isd_beaconing(timestamp, 3)?;   // Propagate 3 best
+// For maximum diversity research (large topologies)
+net.scion_intra_isd_beaconing(timestamp, 100)?; // Propagate 100 best
 ```
+
+**Performance Impact** (per spec analysis):
+- AS with 100 parent links: 5,000 PCBs/interval @ max_pcbs=50
+- Bandwidth: ~2.5 MB/s @ 5s intervals
+- Processing: 10,000 signature verifications/second
+- **Result**: "manageable with even modest consumer hardware"
 
 ### Registration Parameters
 
 ```rust
-// More segments = better path diversity
+// Spec-recommended default
+net.scion_registration_round(50)?;  // Register 50 best (DEFAULT)
+
+// For faster testing
 net.scion_registration_round(10)?;  // Register 10 best
 
-// Fewer segments = less storage overhead
-net.scion_registration_round(3)?;   // Register 3 best
+// For maximum diversity
+net.scion_registration_round(100)?; // Register 100 best
 ```
 
 ### Path Lookup Limits
@@ -630,9 +663,4 @@ println!("Path database: {} segments", cs.path_database.total_count());
 - [Endhost Path Selection](./ENDHOST_PATH_SELECTION.md)
 - [Implementation Tracking](./IMPLEMENTATION_TRACKING.md)
 
-## Support
 
-For issues or questions:
-1. Check existing tests in `bgpsim/src/scion_network.rs`
-2. Review integration tests in `bgpsim/src/scion/integration_tests.rs`
-3. File issues at: https://github.com/anthropics/claude-code/issues
