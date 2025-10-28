@@ -115,19 +115,21 @@ impl<P: Prefix> PathSegment<P> {
         }
     }
 
-    /// Get the source AS of this segment
+    /// Get the source AS of this segment (in forwarding direction)
     pub fn source(&self) -> Option<IsdAs> {
         match self.segment_type {
-            SegmentType::Up | SegmentType::Core => self.as_path.first().copied(),
-            SegmentType::Down => self.as_path.last().copied(),
+            SegmentType::Up => self.as_path.last().copied(), // Up-segments: forwarding goes from last (non-core) to first (core)
+            SegmentType::Core => self.as_path.first().copied(),
+            SegmentType::Down => self.as_path.last().copied(), // Down-segments: forwarding goes from last (core) to first (non-core) in reversed as_path
         }
     }
 
-    /// Get the destination AS of this segment
+    /// Get the destination AS of this segment (in forwarding direction)
     pub fn destination(&self) -> Option<IsdAs> {
         match self.segment_type {
-            SegmentType::Up | SegmentType::Core => self.as_path.last().copied(),
-            SegmentType::Down => self.as_path.first().copied(),
+            SegmentType::Up => self.as_path.first().copied(), // Up-segments: forwarding goes from last (non-core) to first (core)
+            SegmentType::Core => self.as_path.last().copied(),
+            SegmentType::Down => self.as_path.first().copied(), // Down-segments: forwarding goes from last (core) to first (non-core) in reversed as_path
         }
     }
 
@@ -183,7 +185,7 @@ impl<P: Prefix> PathSegment<P> {
         match (self.segment_type, other.segment_type) {
             (SegmentType::Up, SegmentType::Down) => {
                 // Up segment must end at same core AS where down segment starts
-                self.destination() == other.destination()
+                self.destination() == other.source()
             }
             (SegmentType::Up, SegmentType::Core) => {
                 // Up segment must end where core segment starts
@@ -191,7 +193,7 @@ impl<P: Prefix> PathSegment<P> {
             }
             (SegmentType::Core, SegmentType::Down) => {
                 // Core segment must end where down segment starts
-                self.destination() == other.destination()
+                self.destination() == other.source()
             }
             (SegmentType::Core, SegmentType::Core) => {
                 // Core segments can chain if they connect
@@ -261,20 +263,26 @@ impl<P: Prefix> ForwardingPath<P> {
             }
         }
 
-        // Compute complete AS path
+        // Compute complete AS path in forwarding direction
         let mut as_path = Vec::new();
         if let Some(up_seg) = &up {
-            as_path.extend(up_seg.as_path.iter().copied());
+            // Up-segment as_path is in beaconing order (core -> non-core)
+            // For forwarding, we need it in reverse order (non-core -> core)
+            as_path.extend(up_seg.as_path.iter().rev().copied());
         }
         if let Some(core_seg) = &core {
-            // Skip first AS if it's already in the path
+            // Core segments are in beaconing order and can be used as-is
+            // Skip first AS if it's already in the path (junction point with up-segment)
             let start = if !as_path.is_empty() { 1 } else { 0 };
             as_path.extend(core_seg.as_path[start..].iter().copied());
         }
         if let Some(down_seg) = &down {
-            // Down segments are reversed, so we need to handle them carefully
+            // Down-segment as_path is reversed beaconing order (non-core -> ... -> core)
+            // For forwarding (core -> non-core), we reverse it again
+            // Skip first AS after reversal if it's the junction point
+            let reversed: Vec<IsdAs> = down_seg.as_path.iter().rev().copied().collect();
             let start = if !as_path.is_empty() { 1 } else { 0 };
-            as_path.extend(down_seg.as_path[start..].iter().copied());
+            as_path.extend(reversed[start..].iter().copied());
         }
 
         // Calculate total MTU (minimum of all segments)
@@ -485,12 +493,17 @@ mod tests {
     #[test]
     fn test_path_segment_source_destination() {
         let pcb = create_test_pcb();
+        // PCB as_path is [110, 111, 112] (beaconing direction from core 110 to non-core 112)
 
         let up_seg = PathSegment::from_pcb(&pcb, SegmentType::Up);
-        assert_eq!(up_seg.source(), Some(IsdAs::new(1, 110u64)));
-        assert_eq!(up_seg.destination(), Some(IsdAs::new(1, 112u64)));
+        // Up-segment represents path FROM non-core TO core (112 -> 110 in forwarding direction)
+        assert_eq!(up_seg.source(), Some(IsdAs::new(1, 112u64)));
+        assert_eq!(up_seg.destination(), Some(IsdAs::new(1, 110u64)));
 
+        // Down-segment created directly from same PCB (as_path not reversed yet)
         let down_seg = PathSegment::from_pcb(&pcb, SegmentType::Down);
+        // as_path is still [110, 111, 112], but it's marked as Down type
+        // Down-segment: forwarding goes from last to first, so source=112, dest=110
         assert_eq!(down_seg.source(), Some(IsdAs::new(1, 112u64)));
         assert_eq!(down_seg.destination(), Some(IsdAs::new(1, 110u64)));
     }
@@ -523,21 +536,23 @@ mod tests {
     #[test]
     fn test_forwarding_path_creation() {
         // Create up segment from AS1 to core
+        // PCB beaconing goes from core to non-core, so as_path should be [core, as1]
         let info1 = SegmentInfo::new(1000, 12345);
         let mut pcb1: Pcb<SimplePrefix> = Pcb::new(info1);
         let as1 = IsdAs::new(1, 110u64);
         let core = IsdAs::new(1, 200u64); // Core AS
         pcb1.add_as_entry(AsEntry::new(
-            as1,
+            core,
             HopEntry::new(create_test_hop_field(0, 1), 1500),
         ));
         pcb1.add_as_entry(AsEntry::new(
-            core,
+            as1,
             HopEntry::new(create_test_hop_field(1, 2), 1500),
         ));
-        let up_seg = PathSegment::from_pcb(&pcb1, SegmentType::Up);
+        let up_seg = PathSegment::from_pcb(&pcb1, SegmentType::Up); // as_path=[200,110], src=110, dest=200
 
         // Create down segment from core to AS2 (different from AS1)
+        // First create an up-segment from AS2 to core, then reverse it
         let info2 = SegmentInfo::new(1000, 12346);
         let mut pcb2: Pcb<SimplePrefix> = Pcb::new(info2);
         let as2 = IsdAs::new(1, 111u64);
@@ -549,7 +564,8 @@ mod tests {
             as2,
             HopEntry::new(create_test_hop_field(3, 4), 1500),
         ));
-        let down_seg = PathSegment::from_pcb(&pcb2, SegmentType::Down);
+        let temp_up = PathSegment::from_pcb(&pcb2, SegmentType::Up);
+        let down_seg = temp_up.reverse(); // Reverse to get proper down-segment
 
         // Both segments meet at core AS
         let path = ForwardingPath::new(Some(up_seg), None, Some(down_seg));

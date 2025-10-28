@@ -269,10 +269,11 @@ mod tests {
     fn test_path_segment_workflow() {
         let timestamp = 1000u32;
 
-        // Create a PCB: AS1 (core) -> AS2 (core) -> AS3 (core)
-        let as1 = IsdAs::new(1, 110u64);
-        let as2 = IsdAs::new(1, 120u64);
-        let as3 = IsdAs::new(1, 130u64);
+        // Create a PCB: AS1 (core) -> AS2 (intermediary) -> AS3 (non-core)
+        // This represents beaconing from core outward to non-core
+        let as1 = IsdAs::new(1, 110u64); // Core AS
+        let as2 = IsdAs::new(1, 120u64); // Intermediary AS
+        let as3 = IsdAs::new(1, 130u64); // Non-core AS
 
         let pcb = extend_pcb(
             extend_pcb(
@@ -293,21 +294,24 @@ mod tests {
         assert_eq!(pcb.path_length(), 3);
 
         // Create path segments from PCB
+        // PCB as_path is [110, 120, 130] (beaconing from core to non-core)
         let up_segment: PathSegment<SimplePrefix> = PathSegment::from_pcb(&pcb, SegmentType::Up);
-        let down_segment: PathSegment<SimplePrefix> =
-            PathSegment::from_pcb(&pcb, SegmentType::Down);
+        let down_segment: PathSegment<SimplePrefix> = up_segment.reverse(); // Proper way to create down-segment
         let core_segment: PathSegment<SimplePrefix> =
             PathSegment::from_pcb(&pcb, SegmentType::Core);
 
         // Verify segment properties
+        // Up-segment: represents path FROM non-core (130) TO core (110) for forwarding
         assert_eq!(up_segment.segment_type, SegmentType::Up);
-        assert_eq!(up_segment.source(), Some(as1)); // Up: first AS
-        assert_eq!(up_segment.destination(), Some(as3)); // Up: last AS
+        assert_eq!(up_segment.source(), Some(as3)); // Up: from non-core AS3
+        assert_eq!(up_segment.destination(), Some(as1)); // Up: to core AS1
 
+        // Down-segment: reversed up-segment, FROM core (110) TO non-core (130) for forwarding
         assert_eq!(down_segment.segment_type, SegmentType::Down);
-        assert_eq!(down_segment.source(), Some(as3)); // Down: last AS (reversed)
-        assert_eq!(down_segment.destination(), Some(as1)); // Down: first AS (reversed)
+        assert_eq!(down_segment.source(), Some(as1)); // Down: from core AS1
+        assert_eq!(down_segment.destination(), Some(as3)); // Down: to non-core AS3
 
+        // Core-segment: can use same PCB, goes from first to last in beaconing direction
         assert_eq!(core_segment.segment_type, SegmentType::Core);
         assert_eq!(core_segment.source(), Some(as1));
         assert_eq!(core_segment.destination(), Some(as3));
@@ -322,14 +326,19 @@ mod tests {
         assert_eq!(path_db.total_count(), 3);
 
         // Test lookups
-        let up_to_as3 = path_db.lookup_up_segments(&as3);
-        assert_eq!(up_to_as3.len(), 1);
-        assert_eq!(up_to_as3[0].segment_type, SegmentType::Up);
+        // Up-segment: from as3 (non-core) to as1 (core)
+        // lookup_up_segments looks for segments by destination
+        let up_to_as1 = path_db.lookup_up_segments(&as1);
+        assert_eq!(up_to_as1.len(), 1);
+        assert_eq!(up_to_as1[0].segment_type, SegmentType::Up);
 
-        let down_from_as3 = path_db.lookup_down_segments(&as3);
-        assert_eq!(down_from_as3.len(), 1);
-        assert_eq!(down_from_as3[0].segment_type, SegmentType::Down);
+        // Down-segment: from as1 (core) to as3 (non-core)
+        // lookup_down_segments looks for segments by source
+        let down_from_as1 = path_db.lookup_down_segments(&as1);
+        assert_eq!(down_from_as1.len(), 1);
+        assert_eq!(down_from_as1[0].segment_type, SegmentType::Down);
 
+        // Core-segment: from as1 to as3
         let core_to_as3 = path_db.lookup_core_segments(Some(&as1), Some(&as3));
         assert_eq!(core_to_as3.len(), 1);
         assert_eq!(core_to_as3[0].segment_type, SegmentType::Core);
@@ -446,10 +455,11 @@ mod tests {
         let as2_core = IsdAs::new(1, 120u64);
         let as3 = IsdAs::new(1, 130u64);
 
-        // Create up-segment: AS1 -> AS2 (core)
+        // Create up-segment from AS1 to AS2 (core)
+        // PCB beaconing goes from core to non-core: [120, 110]
         let pcb_up = extend_pcb(
-            create_initial_pcb(as1, timestamp, InterfaceId(1), 1500),
-            as2_core,
+            create_initial_pcb(as2_core, timestamp, InterfaceId(1), 1500),
+            as1,
             InterfaceId(1),
             InterfaceId::UNSPECIFIED,
             1500,
@@ -457,9 +467,11 @@ mod tests {
         );
         let up_seg: PathSegment<SimplePrefix> =
             PathSegment::from_pcb(&pcb_up, SegmentType::Up);
+        // up_seg: as_path=[120,110], source=110 (non-core), dest=120 (core)
 
-        // Create down-segment: AS2 (core) -> AS3
-        let pcb_down = extend_pcb(
+        // Create down-segment from AS2 (core) to AS3
+        // First create up-segment from AS3 to AS2, then reverse it
+        let pcb_for_down = extend_pcb(
             create_initial_pcb(as2_core, timestamp, InterfaceId(2), 1400),
             as3,
             InterfaceId(2),
@@ -467,8 +479,9 @@ mod tests {
             1400,
             timestamp,
         );
-        let down_seg: PathSegment<SimplePrefix> =
-            PathSegment::from_pcb(&pcb_down, SegmentType::Down);
+        let temp_up = PathSegment::from_pcb(&pcb_for_down, SegmentType::Up);
+        let down_seg = temp_up.reverse();
+        // down_seg: source=120 (core), dest=130 (non-core)
 
         // Verify segments can connect
         assert!(up_seg.can_connect(&down_seg));
@@ -639,18 +652,22 @@ mod tests {
         // === Phase 4: Forwarding Path Construction ===
 
         // Create up-segment from AS1 to AS2
-        let pcb_1to2 = extend_pcb(
-            create_initial_pcb(as1, timestamp, InterfaceId(1), 1500),
-            as2,
+        // PCB beaconing goes from core (AS2) to non-core (AS1)
+        let pcb_2to1 = extend_pcb(
+            create_initial_pcb(as2, timestamp, InterfaceId(1), 1500),
+            as1,
             InterfaceId(1),
             InterfaceId::UNSPECIFIED,
             1500,
             timestamp,
         );
+        // Up-segment: as_path=[120,110], source=110 (non-core), dest=120 (core)
         let up_seg_1to2: PathSegment<SimplePrefix> =
-            PathSegment::from_pcb(&pcb_1to2, SegmentType::Up);
+            PathSegment::from_pcb(&pcb_2to1, SegmentType::Up);
 
         // Create down-segment from AS3 to AS4
+        // First create up-segment from AS4 to AS3, then reverse it
+        // PCB beaconing goes from core (AS3) to non-core (AS4)
         let pcb_3to4 = extend_pcb(
             create_initial_pcb(as3, timestamp, InterfaceId(2), 1500),
             as4,
@@ -659,8 +676,10 @@ mod tests {
             1500,
             timestamp,
         );
-        let down_seg_3to4: PathSegment<SimplePrefix> =
-            PathSegment::from_pcb(&pcb_3to4, SegmentType::Down);
+        let temp_up = PathSegment::from_pcb(&pcb_3to4, SegmentType::Up);
+        // Down-segment created by reversing up-segment
+        // down_seg: source=130 (core), dest=140 (non-core)
+        let down_seg_3to4 = temp_up.reverse();
 
         // Construct complete path AS1 -> AS2 -> AS3 -> AS4
         let complete_path = ForwardingPath::new(

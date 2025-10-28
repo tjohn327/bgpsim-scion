@@ -210,6 +210,76 @@ impl<P: Prefix> ScionControlService<P> {
         let expired_segments = self.path_database.remove_expired(current_time);
         (expired_pcbs, expired_segments)
     }
+
+    /// Register an up-segment in the path database.
+    ///
+    /// # Arguments
+    /// * `segment` - The up-segment to register
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err(String)` if registration fails
+    pub fn register_up_segment(&mut self, segment: super::PathSegment<P>) -> Result<(), String> {
+        self.path_database.register_segment(segment);
+        Ok(())
+    }
+
+    /// Register a down-segment in the path database.
+    ///
+    /// # Arguments
+    /// * `segment` - The down-segment to register
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err(String)` if registration fails
+    pub fn register_down_segment(&mut self, segment: super::PathSegment<P>) -> Result<(), String> {
+        self.path_database.register_segment(segment);
+        Ok(())
+    }
+
+    /// Register a core-segment in the path database.
+    ///
+    /// # Arguments
+    /// * `segment` - The core-segment to register
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err(String)` if registration fails
+    pub fn register_core_segment(&mut self, segment: super::PathSegment<P>) -> Result<(), String> {
+        self.path_database.register_segment(segment);
+        Ok(())
+    }
+
+    /// Lookup up-segments to a destination.
+    ///
+    /// # Arguments
+    /// * `dst` - Destination ISD-AS
+    ///
+    /// # Returns
+    /// Vector of up-segments to the destination
+    pub fn lookup_up_segments(&self, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
+        self.path_database.lookup_up_segments(dst).into_iter().cloned().collect()
+    }
+
+    /// Lookup down-segments from a source.
+    ///
+    /// # Arguments
+    /// * `src` - Source ISD-AS
+    ///
+    /// # Returns
+    /// Vector of down-segments from the source
+    pub fn lookup_down_segments(&self, src: &IsdAs) -> Vec<super::PathSegment<P>> {
+        self.path_database.lookup_down_segments(src).into_iter().cloned().collect()
+    }
+
+    /// Lookup core-segments between two core ASes.
+    ///
+    /// # Arguments
+    /// * `src` - Source core AS
+    /// * `dst` - Destination core AS
+    ///
+    /// # Returns
+    /// Vector of core-segments between source and destination
+    pub fn lookup_core_segments(&self, src: &IsdAs, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
+        self.path_database.lookup_core_segments(Some(src), Some(dst)).into_iter().cloned().collect()
+    }
 }
 
 #[cfg(test)]

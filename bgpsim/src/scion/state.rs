@@ -325,6 +325,15 @@ impl<P: Prefix> PathDatabase<P> {
     pub fn total_count(&self) -> usize {
         self.up_segments.len() + self.down_segments.len() + self.core_segments.len()
     }
+
+    /// Get all segments (up, down, and core) as a vector.
+    pub fn get_all_segments(&self) -> Vec<PathSegment<P>> {
+        let mut all_segments = Vec::new();
+        all_segments.extend(self.up_segments.iter().cloned());
+        all_segments.extend(self.down_segments.iter().cloned());
+        all_segments.extend(self.core_segments.iter().cloned());
+        all_segments
+    }
 }
 
 #[cfg(test)]
@@ -530,9 +539,12 @@ mod tests {
     fn test_path_database_lookup_up_segments() {
         let mut db = PathDatabase::new(100);
 
-        let seg1 = create_test_segment(SegmentType::Up, 110, 120);
-        let seg2 = create_test_segment(SegmentType::Up, 111, 120);
-        let seg3 = create_test_segment(SegmentType::Up, 112, 121);
+        // create_test_segment(Up, first_as, last_as) creates as_path [first, last]
+        // Up-segment: source=last, destination=first
+        // So create_test_segment(Up, 120, X) creates segment with dest=120
+        let seg1 = create_test_segment(SegmentType::Up, 120, 110); // as_path=[120,110], dest=120
+        let seg2 = create_test_segment(SegmentType::Up, 120, 111); // as_path=[120,111], dest=120
+        let seg3 = create_test_segment(SegmentType::Up, 121, 112); // as_path=[121,112], dest=121
 
         db.register_segment(seg1);
         db.register_segment(seg2);
@@ -540,7 +552,7 @@ mod tests {
 
         let dest = IsdAs::new(1, 120u64);
         let results = db.lookup_up_segments(&dest);
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 2); // Should find seg1 and seg2
     }
 
     #[test]
