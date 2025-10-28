@@ -34,12 +34,53 @@ name = "roland"
 harness = false
 required-features = ["topology_zoo", "rand_queue", "rand"]
 
+[[bench]]
+name = "scion_scalability"
+harness = false
+required-features = ["scion"]
+
+[[example]]
+name = "large_multi_isd"
+path = "../examples/large_multi_isd.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "spec_compliance_test"
+path = "../examples/spec_compliance_test.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "scalability_measurement"
+path = "../examples/scalability_measurement.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "debug_scalability"
+path = "../examples/debug_scalability.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "scalability_measurement_v2"
+path = "../examples/scalability_measurement_v2.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "path_diversity_analysis"
+path = "../examples/path_diversity_analysis.rs"
+required-features = ["scion"]
+
+[[example]]
+name = "simple_path_diversity"
+path = "../examples/simple_path_diversity.rs"
+required-features = ["scion"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
 rand = ["dep:rand"]
 rand_queue = ["rand", "dep:rand_distr", "dep:priority-queue", "dep:geoutils"]
 topology_zoo = ["dep:xmltree", "dep:geoutils", "dep:include-flate", "dep:mapproj"]
 export = ["dep:bimap"]
+scion = []
 
 [dependencies]
 bgpsim-macros = {path = "../bgpsim-macros", version = "0.20.0"}

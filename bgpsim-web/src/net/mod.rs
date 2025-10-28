@@ -290,6 +290,55 @@ impl Net {
             .set_t_data(Point::new(min_x, min_y), Point::new(max_x, max_y));
     }
 
+    /// Get all SCION-enabled routers with their ISD-AS and core status
+    #[cfg(feature = "scion")]
+    pub fn get_scion_routers(&self) -> Vec<(RouterId, bgpsim::scion::IsdAs, bool)> {
+        let net = self.net.borrow();
+        net.indices()
+            .filter_map(|id| {
+                net.get_router(id).ok().and_then(|r| {
+                    r.scion().map(|cs| (id, cs.isd_as, cs.is_core))
+                })
+            })
+            .collect()
+    }
+
+    /// Get all SCION links with their types
+    #[cfg(feature = "scion")]
+    pub fn get_scion_links(&self) -> Vec<(RouterId, RouterId, bgpsim::scion::ScionLinkType)> {
+        let net = self.net.borrow();
+        let mut links = Vec::new();
+
+        for src in net.indices() {
+            let Ok(src_router) = net.get_router(src) else { continue };
+            let Some(src_scion) = src_router.scion() else { continue };
+
+            for interface in src_scion.get_all_interfaces() {
+                let dst = interface.neighbor_router;
+                // Only add each link once (src < dst to avoid duplicates)
+                if src.index() < dst.index() {
+                    links.push((src, dst, interface.link_type));
+                }
+            }
+        }
+        links
+    }
+
+    /// Get all ISDs present in the network
+    #[cfg(feature = "scion")]
+    pub fn get_isds(&self) -> Vec<bgpsim::scion::IsdNumber> {
+        let net = self.net.borrow();
+        let mut isds: Vec<_> = net.indices()
+            .filter_map(|id| {
+                net.get_router(id).ok()
+                    .and_then(|r| r.scion().map(|cs| cs.isd_as.isd))
+            })
+            .collect();
+        isds.sort();
+        isds.dedup();
+        isds
+    }
+
     /// export the current file and download it.
     pub fn export(&self) {
         trigger_download(export_json_str(false), "bgpsim.json");

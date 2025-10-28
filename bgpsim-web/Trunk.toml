@@ -13,9 +13,10 @@ filehash = true
 minify = "on_release"
 
 [watch]
-ignore = ["tailwind.css", "index.css", "logo/light_text.svg", "logo/light_only.svg", "logo/dark_text.svg", "logo/dark_only.svg"]
+ignore = ["tailwind.css", "index.css"]
 
-[[hooks]]
-stage = "pre_build"
-command = "tailwindcss"
-command_arguments = ["-c", "tailwind.config.js", "-o", "tailwind.css"]
+# Disabled - tailwindcss CLI not available
+# [[hooks]]
+# stage = "pre_build"
+# command = "tailwindcss"
+# command_arguments = ["-c", "tailwind.config.js", "-o", "tailwind.css"]

@@ -238,6 +238,12 @@ fn feature_settings(props: &FeatureSettingsProps) -> Html {
         s.features_mut().specification = !old_val;
     });
 
+    #[cfg(feature = "scion")]
+    let toggle_scion = dispatch.reduce_mut_callback(|s| {
+        let old_val = s.features().scion;
+        s.features_mut().scion = !old_val;
+    });
+
     html! {
         <>
             <button class={props.main_class} onclick={toggle_show}>
@@ -280,6 +286,14 @@ fn feature_settings(props: &FeatureSettingsProps) -> Html {
                             <Toggle text={""} on_click={Callback::from(|_| ())} checked={state.features().specification}/>
                         </div>
                     </button>
+                    if cfg!(feature = "scion") {
+                        <button class={element_class} onclick={toggle_scion}>
+                            <p class="flex-1 text-left ml-8">{"SCION"}</p>
+                            <div class="pointer-events-none flex flex-row-reverse mt-2">
+                                <Toggle text={""} on_click={Callback::from(|_| ())} checked={state.features().scion}/>
+                            </div>
+                        </button>
+                    }
                 </div>
             }
         </>

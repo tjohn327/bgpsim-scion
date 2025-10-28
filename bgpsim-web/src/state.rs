@@ -89,6 +89,7 @@ pub struct Features {
     pub bgp: bool,
     pub specification: bool,
     pub simple: bool,
+    pub scion: bool,
 }
 
 impl Default for Features {
@@ -100,6 +101,7 @@ impl Default for Features {
             bgp: true,
             specification: true,
             simple: false,
+            scion: false,
         }
     }
 }
@@ -391,6 +393,8 @@ pub enum Hover {
     },
     Policy(RouterId, usize),
     Help(Html),
+    ScionLink(RouterId, RouterId),
+    ScionPath(Vec<RouterId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +427,7 @@ pub enum Layer {
     RouteProp,
     Ospf,
     Bgp,
+    Scion,
 }
 
 impl std::fmt::Display for Layer {
@@ -432,6 +437,7 @@ impl std::fmt::Display for Layer {
             Layer::RouteProp => f.write_str("Control Plane"),
             Layer::Ospf => f.write_str("OSPF State"),
             Layer::Bgp => f.write_str("BGP Config"),
+            Layer::Scion => f.write_str("SCION"),
         }
     }
 }
@@ -458,6 +464,10 @@ impl Layer {
             }
             Layer::Bgp => {
                 html! { "Visualize the BGP configuration (BGP sessions and route maps)." }
+            }
+            #[cfg(feature = "scion")]
+            Layer::Scion => {
+                html! { "Visualize SCION topology with ISDs, AS relationships, and link types." }
             }
         }
     }

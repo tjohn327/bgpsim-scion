@@ -31,6 +31,38 @@ use crate::{
 
 use crate::scion::types::{InterfaceInfo, IsdAs, ScionLinkType};
 
+/// SCION default parameters based on draft-dekater-scion-controlplane-10
+///
+/// These values are recommended by the SCION specification for production deployments.
+/// See: <https://datatracker.ietf.org/doc/html/draft-dekater-scion-controlplane-10>
+
+/// Maximum number of PCBs to propagate per link (Best PCBs Set Size)
+///
+/// Per spec section 4.1.3.3:
+/// "At most 50 PCBs per child link are propagated"
+pub const DEFAULT_MAX_PCBS: usize = 50;
+
+/// Maximum PCBs for core beaconing (between core ASes)
+///
+/// Per spec section 4.1.4.2:
+/// "at most 5 path segments to every destination AS are discovered"
+pub const DEFAULT_MAX_CORE_PCBS: usize = 5;
+
+/// Default propagation interval for intra-ISD beaconing (in seconds)
+///
+/// Per spec: "should be at least '5' (seconds)"
+pub const DEFAULT_INTRA_ISD_INTERVAL: u32 = 5;
+
+/// Default propagation interval for core beaconing (in seconds)
+///
+/// Per spec: "at least '60' (seconds)"
+pub const DEFAULT_CORE_INTERVAL: u32 = 60;
+
+/// Default hop expiration time (in seconds)
+///
+/// Per spec: "around 6 hours"
+pub const DEFAULT_HOP_EXPIRATION: u32 = 21600; // 6 hours
+
 impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// Enable SCION on a router, creating a SCION Control Service.
     ///
@@ -222,27 +254,37 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                     continue;
                 }
 
-                // Filter to only PCBs from the same ISD (for intra-ISD beaconing)
-                let same_isd_pcbs: Vec<Pcb<P>> = all_pcbs
-                    .iter()
-                    .filter(|pcb| {
-                        // Check if PCB originates from same ISD
-                        if let Some(origin) = pcb.get_origin() {
-                            origin.isd == isd_as.isd
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|p| (*p).clone())
-                    .collect();
+                // Filter PCBs based on AS type:
+                // - Core ASes propagate PCBs from ALL ISDs (they're the inter-ISD gateway)
+                // - Non-core ASes only propagate same-ISD PCBs
+                //
+                // Per spec: "core beaconing... between core ASes in the same or in different ISDs"
+                // Core ASes MUST propagate foreign ISD PCBs downward to enable inter-ISD connectivity
+                let pcbs_to_propagate: Vec<Pcb<P>> = if is_core {
+                    // Core ASes: propagate ALL PCBs (including from foreign ISDs)
+                    all_pcbs.iter().map(|p| (*p).clone()).collect()
+                } else {
+                    // Non-core ASes: only propagate same-ISD PCBs
+                    all_pcbs
+                        .iter()
+                        .filter(|pcb| {
+                            if let Some(origin) = pcb.get_origin() {
+                                origin.isd == isd_as.isd
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|p| (*p).clone())
+                        .collect()
+                };
 
-                // Skip if no same-ISD PCBs
-                if same_isd_pcbs.is_empty() {
+                // Skip if no PCBs to propagate
+                if pcbs_to_propagate.is_empty() {
                     continue;
                 }
 
                 // Select PCBs to propagate
-                let selected_pcbs = select_for_propagation(&same_isd_pcbs, &policy, max_propagate);
+                let selected_pcbs = select_for_propagation(&pcbs_to_propagate, &policy, max_propagate);
 
                 // Get child and peering interfaces
                 let child_interfaces = cs.get_child_interfaces();

@@ -31,6 +31,7 @@ pub mod next_hop;
 pub mod ospf_state;
 pub mod propagation;
 pub mod router;
+pub mod scion_link;
 pub mod text;
 
 #[derive(Clone, Copy, PartialEq, Eq, EnumIter, Debug, Default)]

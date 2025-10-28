@@ -130,6 +130,7 @@ pub fn Canvas(props: &Properties) -> Html {
                 <CanvasFwState />
                 <CanvasBgpConfig />
                 <CanvasRouteProp />
+                <CanvasScion />
                 <CanvasHighlightPath />
                 <OspfState />
                 <CanvasEventQueue />
@@ -376,4 +377,39 @@ pub fn CanvasHighlightPath() -> Html {
         }
         _ => html!(),
     }
+}
+
+#[cfg(feature = "scion")]
+#[function_component]
+pub fn CanvasScion() -> Html {
+    use super::scion_link::ScionLink;
+
+    let layer = use_selector(|state: &State| state.layer());
+    let scion_links = use_selector(|net: &Net| net.get_scion_links());
+
+    log::debug!("render CanvasScion");
+
+    match layer.as_ref() {
+        Layer::Scion => {
+            scion_links
+                .iter()
+                .map(|(src, dst, link_type)| {
+                    html! {
+                        <ScionLink
+                            src={*src}
+                            dst={*dst}
+                            link_type={*link_type}
+                        />
+                    }
+                })
+                .collect()
+        }
+        _ => html!(),
+    }
+}
+
+#[cfg(not(feature = "scion"))]
+#[function_component]
+pub fn CanvasScion() -> Html {
+    html!()
 }

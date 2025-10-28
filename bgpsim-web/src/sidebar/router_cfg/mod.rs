@@ -22,6 +22,7 @@ mod route_map_item_cfg;
 mod route_map_match_cfg;
 mod route_map_set_cfg;
 mod route_maps_cfg;
+mod scion_cfg;
 mod specification_cfg;
 mod static_route_entry_cfg;
 mod static_routes_cfg;
@@ -46,6 +47,7 @@ use crate::{
 
 use super::{Divider, Element, ExpandableDivider, Select, TextField, Toggle};
 use bgp_cfg::BgpCfg;
+use scion_cfg::ScionCfg;
 use specification_cfg::SpecificationCfg;
 use static_routes_cfg::StaticRoutesCfg;
 use topology_cfg::TopologyCfg;
@@ -136,6 +138,9 @@ impl Component for RouterCfg {
                 }
                 if self.state.features().bgp {
                     <BgpCfg {router} {disabled}/>
+                }
+                if self.state.features().scion {
+                    <ScionCfg {router} {disabled}/>
                 }
                 <div></div>
                 if self.state.features().specification {

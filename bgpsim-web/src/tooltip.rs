@@ -222,6 +222,18 @@ impl Component for Tooltip {
                     </div>
                 }
             }
+            #[cfg(feature = "scion")]
+            Hover::ScionLink(src, dst) => {
+                html! {<p> {"SCION Link: "} {src.fmt(&self.net.net()).to_string()} {" ↔ "} {dst.fmt(&self.net.net()).to_string()} </p>}
+            }
+            #[cfg(feature = "scion")]
+            Hover::ScionPath(path) => {
+                let path_str = path.iter()
+                    .map(|r| r.fmt(&self.net.net()).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" → ");
+                html! {<p> {"SCION Path: "} {path_str} </p>}
+            }
             Hover::Message { .. } | Hover::Policy(_, _) => return html! {},
             Hover::None => unreachable!(),
         };
