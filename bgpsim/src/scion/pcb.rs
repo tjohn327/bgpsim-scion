@@ -155,8 +155,16 @@ pub enum PcbValidationError {
     Expired,
     /// Invalid hop field
     InvalidHopField,
-    /// Continuity check failed
-    ContinuityFailure,
+    /// Continuity check failed (ISD-AS mismatch between consecutive entries)
+    ContinuityFailure(String),
+    /// Incoming interface check failed
+    IncomingInterfaceMismatch(String),
+    /// Invalid link type for received PCB
+    InvalidLinkType(String),
+    /// PCB originated from non-core AS during core beaconing
+    NonCoreInCoreBeaconing,
+    /// Empty PCB (no AS entries)
+    EmptyPcb,
 }
 
 impl std::fmt::Display for PcbValidationError {
@@ -166,7 +174,11 @@ impl std::fmt::Display for PcbValidationError {
             PcbValidationError::Loop => write!(f, "PCB contains a loop"),
             PcbValidationError::Expired => write!(f, "PCB has expired"),
             PcbValidationError::InvalidHopField => write!(f, "Invalid hop field"),
-            PcbValidationError::ContinuityFailure => write!(f, "Continuity check failed"),
+            PcbValidationError::ContinuityFailure(msg) => write!(f, "Continuity check failed: {}", msg),
+            PcbValidationError::IncomingInterfaceMismatch(msg) => write!(f, "Incoming interface mismatch: {}", msg),
+            PcbValidationError::InvalidLinkType(msg) => write!(f, "Invalid link type: {}", msg),
+            PcbValidationError::NonCoreInCoreBeaconing => write!(f, "Non-core AS in core beaconing"),
+            PcbValidationError::EmptyPcb => write!(f, "Empty PCB"),
         }
     }
 }

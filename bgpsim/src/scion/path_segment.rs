@@ -89,6 +89,7 @@ impl<P: Prefix> PathSegment<P> {
                     position: pos,
                     peer_isd_as: peer_entry.peer_isd_as,
                     peer_interface: peer_entry.peer_interface,
+                    peer_mtu: peer_entry.peer_mtu,
                     hop_field: peer_entry.hop_field,
                 });
             }
@@ -164,7 +165,10 @@ impl<P: Prefix> PathSegment<P> {
             .iter()
             .map(|p| PeeringShortcut {
                 position: max_pos.saturating_sub(p.position),
-                ..*p
+                peer_isd_as: p.peer_isd_as,
+                peer_interface: p.peer_interface,
+                peer_mtu: p.peer_mtu,
+                hop_field: p.hop_field,
             })
             .collect();
 
@@ -178,6 +182,84 @@ impl<P: Prefix> PathSegment<P> {
             mtu: self.mtu,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Chain multiple core segments together into a single logical segment.
+    ///
+    /// This is used for multi-hop inter-ISD paths where traffic traverses multiple ISDs.
+    /// The segments must form a valid chain (end of one segment connects to start of next).
+    ///
+    /// # Arguments
+    /// * `segments` - Vector of core segments to chain together
+    ///
+    /// # Returns
+    /// A single combined core segment, or None if chain is invalid
+    pub fn chain_core_segments(segments: Vec<PathSegment<P>>) -> Option<Self> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        if segments.len() == 1 {
+            return Some(segments[0].clone());
+        }
+
+        // Verify all segments are core segments
+        if !segments.iter().all(|s| matches!(s.segment_type, SegmentType::Core)) {
+            return None;
+        }
+
+        // Verify segments form a valid chain
+        for i in 0..segments.len() - 1 {
+            let curr_dest = segments[i].destination()?;
+            let next_src = segments[i + 1].source()?;
+            if curr_dest != next_src {
+                return None; // Chain is broken
+            }
+        }
+
+        // Combine all segments
+        let mut combined_hop_fields = Vec::new();
+        let mut combined_as_path = Vec::new();
+        let mut combined_peering = Vec::new();
+        let mut min_mtu = u16::MAX;
+        let mut min_expiration = u32::MAX;
+
+        for (seg_idx, seg) in segments.iter().enumerate() {
+            // Add hop fields
+            combined_hop_fields.extend(seg.hop_fields.iter().cloned());
+
+            // Add AS path (avoid duplicating the connecting AS)
+            if seg_idx == 0 {
+                combined_as_path.extend(seg.as_path.iter().cloned());
+            } else {
+                // Skip first AS (it's the same as last AS of previous segment)
+                combined_as_path.extend(seg.as_path.iter().skip(1).cloned());
+            }
+
+            // Adjust peering positions and add
+            let offset = if seg_idx == 0 { 0 } else { combined_as_path.len() - seg.as_path.len() + 1 };
+            for peering in &seg.peering_options {
+                combined_peering.push(PeeringShortcut {
+                    position: peering.position + offset,
+                    ..*peering
+                });
+            }
+
+            // Track minimum MTU and expiration
+            min_mtu = min_mtu.min(seg.mtu);
+            min_expiration = min_expiration.min(seg.expiration);
+        }
+
+        Some(PathSegment {
+            segment_type: SegmentType::Core,
+            info: segments[0].info, // Use first segment's info
+            hop_fields: combined_hop_fields,
+            as_path: combined_as_path,
+            peering_options: combined_peering,
+            expiration: min_expiration,
+            mtu: min_mtu,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     /// Check if this segment can connect with another segment
@@ -202,6 +284,42 @@ impl<P: Prefix> PathSegment<P> {
             _ => false,
         }
     }
+
+    /// Find peering shortcuts between two segments.
+    ///
+    /// Returns a list of possible peering shortcuts where the two segments
+    /// can be connected via a peering link instead of going through core.
+    ///
+    /// # Arguments
+    /// * `other` - The other segment to check for peering opportunities
+    ///
+    /// # Returns
+    /// Vector of tuples: (position_in_self, position_in_other, PeeringShortcut)
+    pub fn find_peering_shortcuts(
+        &self,
+        other: &PathSegment<P>,
+    ) -> Vec<(usize, usize, &PeeringShortcut)> {
+        let mut shortcuts = Vec::new();
+
+        // Check each peering option in self
+        for peering in &self.peering_options {
+            // Find the position in other's as_path where the peer AS appears
+            for (other_pos, &other_as) in other.as_path.iter().enumerate() {
+                if other_as == peering.peer_isd_as {
+                    // Found a matching AS, now check if other has a peering option back to self
+                    for other_peering in &other.peering_options {
+                        // Check if the peering is at the correct position and points back
+                        if other_peering.position == other_pos &&
+                           self.as_path.get(peering.position) == Some(&other_peering.peer_isd_as) {
+                            shortcuts.push((peering.position, other_pos, peering));
+                        }
+                    }
+                }
+            }
+        }
+
+        shortcuts
+    }
 }
 
 /// Information about a peering shortcut available in a path segment.
@@ -213,6 +331,8 @@ pub struct PeeringShortcut {
     pub peer_isd_as: IsdAs,
     /// Interface ID on the peer's side
     pub peer_interface: InterfaceId,
+    /// MTU of the peering link
+    pub peer_mtu: u16,
     /// Hop field for the peering link
     pub hop_field: HopField,
 }
@@ -301,6 +421,81 @@ impl<P: Prefix> ForwardingPath<P> {
             core_segment: core,
             down_segment: down,
             peering_shortcut: None,
+            as_path,
+            mtu,
+        })
+    }
+
+    /// Create a new forwarding path using a peering shortcut.
+    ///
+    /// This method creates a path that uses a direct peering link between two ASes
+    /// instead of going through a core AS. According to SCION spec, paths can contain
+    /// at most one peering link.
+    ///
+    /// # Arguments
+    /// * `seg1` - First segment (typically an up-segment)
+    /// * `seg2` - Second segment (typically a down-segment or another up-segment)
+    /// * `peering_pos1` - Position in seg1's as_path where peering AS is
+    /// * `peering_pos2` - Position in seg2's as_path where peering AS is
+    /// * `peering` - The peering shortcut information
+    ///
+    /// # Returns
+    /// A ForwardingPath that uses the peering shortcut, or an error if construction fails
+    pub fn new_with_peering(
+        seg1: PathSegment<P>,
+        seg2: PathSegment<P>,
+        peering_pos1: usize,
+        peering_pos2: usize,
+        peering: PeeringShortcut,
+    ) -> Result<Self, PathConstructionError> {
+        // Compute AS path using the peering shortcut
+        // Path goes: seg1[..=peering_pos1] -> peering link -> seg2[peering_pos2..]
+
+        let mut as_path = Vec::new();
+
+        // Add ASes from seg1 in forwarding direction up to and including the peering AS
+        let seg1_forwarding: Vec<IsdAs> = match seg1.segment_type {
+            SegmentType::Up => seg1.as_path.iter().rev().copied().collect(),
+            SegmentType::Down => seg1.as_path.iter().rev().copied().collect(),
+            SegmentType::Core => seg1.as_path.clone(),
+        };
+
+        // Calculate peering position in forwarding direction for seg1
+        let peering_pos1_fwd = if matches!(seg1.segment_type, SegmentType::Up | SegmentType::Down) {
+            seg1.as_path.len() - 1 - peering_pos1
+        } else {
+            peering_pos1
+        };
+
+        as_path.extend(seg1_forwarding[..=peering_pos1_fwd].iter().copied());
+
+        // Add ASes from seg2 in forwarding direction starting after the peering AS
+        let seg2_forwarding: Vec<IsdAs> = match seg2.segment_type {
+            SegmentType::Up => seg2.as_path.iter().rev().copied().collect(),
+            SegmentType::Down => seg2.as_path.iter().rev().copied().collect(),
+            SegmentType::Core => seg2.as_path.clone(),
+        };
+
+        // Calculate peering position in forwarding direction for seg2
+        let peering_pos2_fwd = if matches!(seg2.segment_type, SegmentType::Up | SegmentType::Down) {
+            seg2.as_path.len() - 1 - peering_pos2
+        } else {
+            peering_pos2
+        };
+
+        // Skip the peering AS in seg2 (already included from seg1) and add remaining ASes
+        if peering_pos2_fwd + 1 < seg2_forwarding.len() {
+            as_path.extend(seg2_forwarding[peering_pos2_fwd + 1..].iter().copied());
+        }
+
+        // Calculate MTU (minimum of both segments and peering link)
+        let mtu = seg1.mtu.min(seg2.mtu).min(peering.peer_mtu);
+
+        Ok(ForwardingPath {
+            up_segment: Some(seg1),
+            core_segment: None,
+            down_segment: Some(seg2),
+            peering_shortcut: Some(peering),
             as_path,
             mtu,
         })
@@ -606,5 +801,206 @@ mod tests {
         let hops = path.get_hop_fields();
 
         assert_eq!(hops.len(), 3);
+    }
+
+    #[test]
+    fn test_peering_shortcut_detection() {
+        use crate::scion::pcb::{AsEntry, HopEntry, PeerEntry, SegmentInfo};
+
+        // Create two PCBs with peering links
+        let info1 = SegmentInfo::new(1000, 12345);
+        let mut pcb1: Pcb<SimplePrefix> = Pcb::new(info1);
+
+        let as1 = IsdAs::new(1, 110u64);  // Non-core
+        let as2 = IsdAs::new(1, 120u64);  // Peer
+        let core = IsdAs::new(1, 200u64); // Core
+
+        // PCB1: core -> as1, with peering to as2
+        pcb1.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 1), 1500),
+        ));
+
+        let mut as1_entry = AsEntry::new(
+            as1,
+            HopEntry::new(create_test_hop_field(1, 0), 1500),
+        );
+        // Add peering to as2
+        as1_entry.peer_entries.push(PeerEntry {
+            peer_isd_as: as2,
+            peer_interface: InterfaceId(10),
+            peer_mtu: 1400,
+            hop_field: create_test_hop_field(5, 0),
+        });
+        pcb1.add_as_entry(as1_entry);
+
+        // PCB2: core -> as2, with peering to as1
+        let info2 = SegmentInfo::new(1000, 12346);
+        let mut pcb2: Pcb<SimplePrefix> = Pcb::new(info2);
+
+        pcb2.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 2), 1500),
+        ));
+
+        let mut as2_entry = AsEntry::new(
+            as2,
+            HopEntry::new(create_test_hop_field(2, 0), 1500),
+        );
+        // Add peering to as1
+        as2_entry.peer_entries.push(PeerEntry {
+            peer_isd_as: as1,
+            peer_interface: InterfaceId(5),
+            peer_mtu: 1400,
+            hop_field: create_test_hop_field(10, 0),
+        });
+        pcb2.add_as_entry(as2_entry);
+
+        let seg1 = PathSegment::from_pcb(&pcb1, SegmentType::Up);
+        let seg2 = PathSegment::from_pcb(&pcb2, SegmentType::Up);
+
+        // Find peering shortcuts
+        let shortcuts = seg1.find_peering_shortcuts(&seg2);
+
+        // Should find at least one shortcut
+        assert!(!shortcuts.is_empty(), "Should find peering shortcuts");
+
+        // Verify the shortcut has correct peer AS
+        let (pos1, pos2, peering) = shortcuts[0];
+        assert_eq!(peering.peer_isd_as, as2);
+        assert!(pos1 < seg1.as_path.len());
+        assert!(pos2 < seg2.as_path.len());
+    }
+
+    #[test]
+    fn test_forwarding_path_with_peering() {
+        use crate::scion::pcb::{AsEntry, HopEntry, PeerEntry, SegmentInfo};
+
+        // Create two segments with peering
+        let info1 = SegmentInfo::new(1000, 12345);
+        let mut pcb1: Pcb<SimplePrefix> = Pcb::new(info1);
+
+        let as1 = IsdAs::new(1, 110u64);
+        let as2 = IsdAs::new(1, 120u64);
+        let core = IsdAs::new(1, 200u64);
+
+        // PCB1: core -> as1, with peering to as2
+        pcb1.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 1), 1500),
+        ));
+
+        let mut as1_entry = AsEntry::new(
+            as1,
+            HopEntry::new(create_test_hop_field(1, 0), 1500),
+        );
+        as1_entry.peer_entries.push(PeerEntry {
+            peer_isd_as: as2,
+            peer_interface: InterfaceId(10),
+            peer_mtu: 1400,
+            hop_field: create_test_hop_field(5, 0),
+        });
+        pcb1.add_as_entry(as1_entry);
+
+        // PCB2: core -> as2, with peering to as1
+        let info2 = SegmentInfo::new(1000, 12346);
+        let mut pcb2: Pcb<SimplePrefix> = Pcb::new(info2);
+
+        pcb2.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 2), 1500),
+        ));
+
+        let mut as2_entry = AsEntry::new(
+            as2,
+            HopEntry::new(create_test_hop_field(2, 0), 1500),
+        );
+        as2_entry.peer_entries.push(PeerEntry {
+            peer_isd_as: as1,
+            peer_interface: InterfaceId(5),
+            peer_mtu: 1400,
+            hop_field: create_test_hop_field(10, 0),
+        });
+        pcb2.add_as_entry(as2_entry);
+
+        let seg1 = PathSegment::from_pcb(&pcb1, SegmentType::Up);
+        let seg2 = PathSegment::from_pcb(&pcb2, SegmentType::Up);
+
+        // Find and use peering shortcut
+        let shortcuts = seg1.find_peering_shortcuts(&seg2);
+        assert!(!shortcuts.is_empty());
+
+        let (pos1, pos2, peering) = shortcuts[0];
+        let path = ForwardingPath::new_with_peering(
+            seg1.clone(),
+            seg2.clone(),
+            pos1,
+            pos2,
+            *peering,
+        );
+
+        assert!(path.is_ok(), "Should create peering path");
+        let path = path.unwrap();
+
+        // Path should have peering shortcut set
+        assert!(path.peering_shortcut.is_some());
+
+        // MTU should be minimum of segments and peering link
+        assert_eq!(path.mtu, 1400);
+
+        // Path should not go through core
+        assert!(path.length() < 4, "Peering shortcut should be shorter");
+    }
+
+    #[test]
+    fn test_peering_shortcut_no_match() {
+        use crate::scion::pcb::{AsEntry, HopEntry, PeerEntry, SegmentInfo};
+
+        // Create two segments with non-matching peering
+        let info1 = SegmentInfo::new(1000, 12345);
+        let mut pcb1: Pcb<SimplePrefix> = Pcb::new(info1);
+
+        let as1 = IsdAs::new(1, 110u64);
+        let as3 = IsdAs::new(1, 130u64); // Different peer
+        let core = IsdAs::new(1, 200u64);
+
+        pcb1.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 1), 1500),
+        ));
+
+        let mut as1_entry = AsEntry::new(
+            as1,
+            HopEntry::new(create_test_hop_field(1, 0), 1500),
+        );
+        // Peering to as3 (not as2)
+        as1_entry.peer_entries.push(PeerEntry {
+            peer_isd_as: as3,
+            peer_interface: InterfaceId(10),
+            peer_mtu: 1400,
+            hop_field: create_test_hop_field(5, 0),
+        });
+        pcb1.add_as_entry(as1_entry);
+
+        // PCB2 without matching peering
+        let info2 = SegmentInfo::new(1000, 12346);
+        let mut pcb2: Pcb<SimplePrefix> = Pcb::new(info2);
+        let as2 = IsdAs::new(1, 120u64);
+
+        pcb2.add_as_entry(AsEntry::new(
+            core,
+            HopEntry::new(create_test_hop_field(0, 2), 1500),
+        ));
+        pcb2.add_as_entry(AsEntry::new(
+            as2,
+            HopEntry::new(create_test_hop_field(2, 0), 1500),
+        ));
+
+        let seg1 = PathSegment::from_pcb(&pcb1, SegmentType::Up);
+        let seg2 = PathSegment::from_pcb(&pcb2, SegmentType::Up);
+
+        // Should not find any shortcuts
+        let shortcuts = seg1.find_peering_shortcuts(&seg2);
+        assert!(shortcuts.is_empty(), "Should not find shortcuts without matching peering");
     }
 }

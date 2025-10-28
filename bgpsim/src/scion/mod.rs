@@ -68,6 +68,7 @@
 pub mod beaconing;
 pub mod event;
 pub mod path_segment;
+pub mod path_selection;
 pub mod pcb;
 pub mod process;
 pub mod state;
@@ -85,6 +86,9 @@ pub use event::ScionEvent;
 pub use path_segment::{
     ForwardingPath, PathConstructionError, PathSegment, PathValidationError, PeeringShortcut,
     SegmentType,
+};
+pub use path_selection::{
+    AllPathsPolicy, FirstNPolicy, HighestMtuPolicy, PathSelectionPolicy, ShortestPathPolicy,
 };
 pub use pcb::{
     AsEntry, HopEntry, HopField, Pcb, PcbExtensions, PcbValidationError, PeerEntry, SegmentInfo,

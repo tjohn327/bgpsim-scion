@@ -258,6 +258,17 @@ impl<P: Prefix> ScionControlService<P> {
         self.path_database.lookup_up_segments(dst).into_iter().cloned().collect()
     }
 
+    /// Lookup up-segments from a source.
+    ///
+    /// # Arguments
+    /// * `src` - Source ISD-AS
+    ///
+    /// # Returns
+    /// Vector of up-segments from the source
+    pub fn lookup_up_segments_from(&self, src: &IsdAs) -> Vec<super::PathSegment<P>> {
+        self.path_database.lookup_up_segments_from(src).into_iter().cloned().collect()
+    }
+
     /// Lookup down-segments from a source.
     ///
     /// # Arguments
@@ -267,6 +278,17 @@ impl<P: Prefix> ScionControlService<P> {
     /// Vector of down-segments from the source
     pub fn lookup_down_segments(&self, src: &IsdAs) -> Vec<super::PathSegment<P>> {
         self.path_database.lookup_down_segments(src).into_iter().cloned().collect()
+    }
+
+    /// Lookup down-segments to a destination.
+    ///
+    /// # Arguments
+    /// * `dst` - Destination ISD-AS
+    ///
+    /// # Returns
+    /// Vector of down-segments to the destination
+    pub fn lookup_down_segments_to(&self, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
+        self.path_database.lookup_down_segments_to(dst).into_iter().cloned().collect()
     }
 
     /// Lookup core-segments between two core ASes.

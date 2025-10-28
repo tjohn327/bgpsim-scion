@@ -219,6 +219,19 @@ impl<P: Prefix> PathDatabase<P> {
             .collect()
     }
 
+    /// Lookup up-segments from a specific source.
+    ///
+    /// # Arguments
+    /// * `source` - The source ISD-AS (typically a non-core AS)
+    ///
+    /// Returns all up-segments originating from the source.
+    pub fn lookup_up_segments_from(&self, source: &IsdAs) -> Vec<&PathSegment<P>> {
+        self.up_segments
+            .iter()
+            .filter(|seg| seg.source() == Some(*source))
+            .collect()
+    }
+
     /// Lookup down-segments from a specific source.
     ///
     /// # Arguments
