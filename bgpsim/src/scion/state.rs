@@ -216,6 +216,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.up_segments
             .iter()
             .filter(|seg| seg.destination() == Some(*destination))
+            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
             .collect()
     }
 
@@ -229,6 +230,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.up_segments
             .iter()
             .filter(|seg| seg.source() == Some(*source))
+            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
             .collect()
     }
 
@@ -242,6 +244,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.down_segments
             .iter()
             .filter(|seg| seg.source() == Some(*source))
+            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
             .collect()
     }
 
@@ -255,6 +258,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.down_segments
             .iter()
             .filter(|seg| seg.destination() == Some(*destination))
+            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
             .collect()
     }
 
@@ -285,6 +289,7 @@ impl<P: Prefix> PathDatabase<P> {
                 }
                 true
             })
+            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
             .collect()
     }
 

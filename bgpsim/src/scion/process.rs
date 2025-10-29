@@ -255,7 +255,8 @@ impl<P: Prefix> ScionControlService<P> {
     /// # Returns
     /// Vector of up-segments to the destination
     pub fn lookup_up_segments(&self, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
-        self.path_database.lookup_up_segments(dst).into_iter().cloned().collect()
+        // Limit segments to prevent OOM (spec-compliant: line 1558 recommends max 50)
+        self.path_database.lookup_up_segments(dst).into_iter().take(1000).cloned().collect()
     }
 
     /// Lookup up-segments from a source.
@@ -266,7 +267,8 @@ impl<P: Prefix> ScionControlService<P> {
     /// # Returns
     /// Vector of up-segments from the source
     pub fn lookup_up_segments_from(&self, src: &IsdAs) -> Vec<super::PathSegment<P>> {
-        self.path_database.lookup_up_segments_from(src).into_iter().cloned().collect()
+        // Limit segments to prevent OOM (spec-compliant: line 1558 recommends max 50)
+        self.path_database.lookup_up_segments_from(src).into_iter().take(1000).cloned().collect()
     }
 
     /// Lookup down-segments from a source.
@@ -288,7 +290,8 @@ impl<P: Prefix> ScionControlService<P> {
     /// # Returns
     /// Vector of down-segments to the destination
     pub fn lookup_down_segments_to(&self, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
-        self.path_database.lookup_down_segments_to(dst).into_iter().cloned().collect()
+        // Limit segments to prevent OOM (spec-compliant: line 1558 recommends max 50)
+        self.path_database.lookup_down_segments_to(dst).into_iter().take(1000).cloned().collect()
     }
 
     /// Lookup core-segments between two core ASes.
@@ -300,7 +303,8 @@ impl<P: Prefix> ScionControlService<P> {
     /// # Returns
     /// Vector of core-segments between source and destination
     pub fn lookup_core_segments(&self, src: &IsdAs, dst: &IsdAs) -> Vec<super::PathSegment<P>> {
-        self.path_database.lookup_core_segments(Some(src), Some(dst)).into_iter().cloned().collect()
+        // Limit segments to prevent OOM (spec-compliant: line 1558 recommends max 50)
+        self.path_database.lookup_core_segments(Some(src), Some(dst)).into_iter().take(1000).cloned().collect()
     }
 }
 

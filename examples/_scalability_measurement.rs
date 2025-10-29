@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Scalability Measurement V2
+// Scalability Measurement
 //
-// Fixed version that properly tracks routers during creation
+// Manual timing of SCION operations at different scales
 //
 // Uses SCION specification defaults (draft-dekater-scion-controlplane-10):
 //   - max_pcbs = 50 (recommended best PCBs set size)
@@ -24,14 +24,14 @@ struct IsdTopology {
 }
 
 fn main() -> Result<(), NetworkError> {
-    println!("=== SCION Scalability Measurement V2 ===");
+    println!("=== SCION Scalability Measurement ===");
     println!("System: 24 cores, 32GB RAM");
     println!("Spec: draft-dekater-scion-controlplane-10");
     println!("  max_pcbs = 50 (spec-recommended)");
     println!("  topology-aware beaconing rounds\n");
 
     // Test sizes
-    let sizes = vec![100, 1000, 10000, 100000];
+    let sizes = vec![10, 50, 100, 500, 1000];
 
     for size in sizes {
         println!("\n{}", "=".repeat(60));
@@ -124,50 +124,21 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
     println!("   Registered: {} up, {} down, {} core segments", up, down, core);
 
     // 4. Path Lookup
-    println!("4. Path lookup (preparing...)");
-
-    // Adaptive query count based on network size
-    let query_routers = if size >= 10000 {
-        3  // For 10k+: 3 routers = 3 queries
-    } else if size >= 1000 {
-        4  // For 1k: 4 routers = 6 queries
-    } else {
-        5  // For <1k: 5 routers = 10 queries
-    };
-
-    let routers: Vec<_> = net.indices().take(query_routers.min(actual_routers)).collect();
-    println!("   Selected {} routers for testing", routers.len());
-
+    println!("4. Path lookup (preparing routers...)");
+    let routers: Vec<_> = net.indices().take(10.min(actual_routers)).collect();
+    println!("   Selected {} routers for path lookup test", routers.len());
     let mut lookup_times = Vec::new();
-    let max_queries = routers.len().min(query_routers);
-    let total_queries = max_queries * (max_queries - 1) / 2;
 
-    println!("   Will test {} queries (pairs from first {} routers)", total_queries, max_queries);
+    let query_count = routers.len().min(5);
+    println!("   Will perform {} x {} = {} queries", query_count, query_count - 1, query_count * (query_count - 1) / 2);
 
-    for i in 0..routers.len().min(query_routers) {
-        for j in (i+1)..routers.len().min(query_routers) {
-            let query_num = lookup_times.len() + 1;
-            println!("   Query {}/{}: router[{}] -> router[{}]", query_num, total_queries, i, j);
-
+    for i in 0..routers.len().min(5) {
+        for j in (i+1)..routers.len().min(5) {
+            println!("   Query {}->{} (pair {}/{}): starting...", i, j, lookup_times.len() + 1, query_count * (query_count - 1) / 2);
             let start = Instant::now();
-            println!("      Looking up path segments (spec-compliant)...");
-
-            // Use spec-compliant segment lookup
-            let segments = net.scion_lookup_path_segments(routers[i], routers[j])?;
+            let paths = net.scion_lookup_paths(routers[i], routers[j])?;
             let lookup_time = start.elapsed();
-
-            println!("      -> Found {} up, {} core, {} down segments in {:.6}s",
-                segments.up_segments.len(),
-                segments.core_segments.len(),
-                segments.down_segments.len(),
-                lookup_time.as_secs_f64());
-
-            // Estimate potential paths (without materializing them all)
-            let potential_paths = segments.up_segments.len().max(1)
-                * segments.core_segments.len().max(1)
-                * segments.down_segments.len().max(1);
-            println!("      -> Potential path combinations: {}", potential_paths);
-
+            println!("      -> Found {} paths in {:.6}s", paths.len(), lookup_time.as_secs_f64());
             lookup_times.push(lookup_time);
         }
     }
