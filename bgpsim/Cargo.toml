@@ -113,3 +113,14 @@ pretty_assertions = "1.2.1"
 criterion = "0.4.0"
 approx = "0.5.1"
 generic-tests = "0.1.2"
+
+  [[example]]
+  name = "scion_demo"
+  path = "../examples/scion_demo.rs"
+  required-features = ["scion"]
+
+  [[example]]
+  name = "simple_multi_isd"
+  path = "../examples/simple_multi_isd.rs"
+  required-features = ["scion"]
+  

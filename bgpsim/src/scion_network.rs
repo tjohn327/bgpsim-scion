@@ -512,10 +512,8 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             let router = self.get_router_mut(router_id)?;
 
             if let Some(cs) = router.scion_mut() {
-                // Only core ASes register down-segments
-                if !cs.is_core {
-                    continue;
-                }
+                // All ASes can reverse their stored up-segments to create down-segments
+                // In hierarchical topologies, transits have up-segments from leaves
 
                 // Get all up-segments from path database
                 let up_segments = cs.path_database.get_all_segments();
@@ -692,19 +690,48 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         // Same ISD: up + down segments
         if src_isd_as.isd == dst_isd_as.isd {
             // Collect up segments if source is not core
+            // Note: up-segments can be stored at any AS in the source ISD
             if !src_cs.is_core {
-                up_segments = src_cs.lookup_up_segments(&src_isd_as)
-                    .into_iter()
-                    .take(MAX_SEGMENTS)
-                    .collect();
+                for router_id in self.routers.keys() {
+                    if let Ok(r) = self.get_router(*router_id) {
+                        if let Some(cs) = r.scion() {
+                            // Check all ASes in the source ISD (not just cores)
+                            if cs.isd_as.isd == src_isd_as.isd {
+                                up_segments.extend(
+                                    cs.lookup_up_segments_from(&src_isd_as)
+                                        .into_iter()
+                                        .take(MAX_SEGMENTS - up_segments.len())
+                                );
+                                if up_segments.len() >= MAX_SEGMENTS {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Collect down segments if destination is not core
+            // Note: down-segments are ONLY stored at core ASes (not transits/leaves)
             if !dst_cs.is_core {
-                down_segments = dst_cs.lookup_down_segments_to(&dst_isd_as)
-                    .into_iter()
-                    .take(MAX_SEGMENTS)
-                    .collect();
+                for router_id in self.routers.keys() {
+                    if let Ok(r) = self.get_router(*router_id) {
+                        if let Some(cs) = r.scion() {
+                            // Check all ASes in the destination ISD (not just cores)
+                            // In hierarchical topologies, down-segments may be stored at transits
+                            if cs.isd_as.isd == dst_isd_as.isd {
+                                down_segments.extend(
+                                    cs.lookup_down_segments_to(&dst_isd_as)
+                                        .into_iter()
+                                        .take(MAX_SEGMENTS - down_segments.len())
+                                );
+                                if down_segments.len() >= MAX_SEGMENTS {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // If both are core, get core segments between them
@@ -718,11 +745,12 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             // Different ISDs: need up + core + down
             // Collect up segments from source
             if !src_cs.is_core {
-                // Get up segments from any core in source ISD
+                // Get up segments from any AS in source ISD
                 for router_id in self.routers.keys() {
                     if let Ok(r) = self.get_router(*router_id) {
                         if let Some(cs) = r.scion() {
-                            if cs.is_core && cs.isd_as.isd == src_isd_as.isd {
+                            // Check all ASes in source ISD (not just cores)
+                            if cs.isd_as.isd == src_isd_as.isd {
                                 up_segments.extend(
                                     cs.lookup_up_segments_from(&src_isd_as)
                                         .into_iter()
@@ -771,7 +799,9 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 for router_id in self.routers.keys() {
                     if let Ok(r) = self.get_router(*router_id) {
                         if let Some(cs) = r.scion() {
-                            if cs.is_core && cs.isd_as.isd == dst_isd_as.isd {
+                            // Check all ASes in destination ISD (not just cores)
+                            // In hierarchical topologies, down-segments may be stored at transits
+                            if cs.isd_as.isd == dst_isd_as.isd {
                                 down_segments.extend(
                                     cs.lookup_down_segments_to(&dst_isd_as)
                                         .into_iter()
