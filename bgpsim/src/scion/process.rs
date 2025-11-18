@@ -306,6 +306,221 @@ impl<P: Prefix> ScionControlService<P> {
         // Limit segments to prevent OOM (spec-compliant: line 1558 recommends max 50)
         self.path_database.lookup_core_segments(Some(src), Some(dst)).into_iter().take(1000).cloned().collect()
     }
+
+    /// Handle a SCION event (event-driven architecture).
+    ///
+    /// This follows the same pattern as BGP event handling:
+    /// 1. Process incoming event (store PCB, register segment, etc.)
+    /// 2. Make local decisions (select best PCBs)
+    /// 3. Generate new events for neighbors (only if necessary)
+    ///
+    /// # Arguments
+    /// * `from` - Source router of the event
+    /// * `event` - The SCION event to handle
+    ///
+    /// # Returns
+    /// Vector of new events to enqueue
+    pub fn handle_event<T: Default>(
+        &mut self,
+        from: RouterId,
+        event: super::ScionEvent<P>,
+    ) -> Result<Vec<crate::event::Event<P, T>>, crate::types::DeviceError> {
+        use crate::event::Event;
+        use super::ScionEvent;
+        use super::beaconing::{select_for_propagation, extend_pcb, add_peering_entries, SimpleSelectionPolicy};
+
+        match event {
+            ScionEvent::BeaconPropagation { pcb, .. } => {
+                // 1. Store PCB in beacon store (like BGP RIB_IN)
+                let inserted = self.beacon_store.insert(pcb.clone());
+                if !inserted {
+                    // PCB was rejected (duplicate or at capacity)
+                    // No propagation needed
+                    return Ok(vec![]);
+                }
+
+                // 2. Select best PCBs for propagation (like BGP decision process)
+                let all_pcbs = self.beacon_store.get_all();
+
+                // Filter PCBs based on AS type (critical for multi-ISD)
+                let pcbs_to_propagate: Vec<_> = if self.is_core {
+                    // Core ASes propagate ALL PCBs (including foreign ISDs)
+                    all_pcbs.iter().map(|p| (*p).clone()).collect()
+                } else {
+                    // Non-core ASes only propagate same-ISD PCBs
+                    all_pcbs
+                        .iter()
+                        .filter(|pcb| {
+                            if let Some(origin) = pcb.get_origin() {
+                                origin.isd == self.isd_as.isd
+                            } else {
+                                false
+                            }
+                        })
+                        .map(|p| (*p).clone())
+                        .collect()
+                };
+
+                if pcbs_to_propagate.is_empty() {
+                    return Ok(vec![]);
+                }
+
+                // Select best PCBs (spec-compliant: max 50)
+                let selected_pcbs = select_for_propagation(
+                    &pcbs_to_propagate,
+                    &SimpleSelectionPolicy,
+                    50
+                );
+
+                // 3. Generate propagation events for children and core neighbors (like BGP dissemination)
+                let mut events = Vec::new();
+                let child_interfaces = self.get_child_interfaces();
+                let core_interfaces = if self.is_core {
+                    // Core ASes also propagate to other core ASes
+                    self.get_core_interfaces()
+                } else {
+                    vec![]
+                };
+                let peering_interfaces = self.get_peering_interfaces();
+
+                // Prepare peering entries
+                let peering_entries: Vec<(IsdAs, InterfaceId, InterfaceId, u16)> =
+                    peering_interfaces
+                        .iter()
+                        .map(|iface| {
+                            (
+                                iface.neighbor_isd_as,
+                                iface.interface_id,
+                                iface.interface_id,
+                                iface.mtu,
+                            )
+                        })
+                        .collect();
+
+                // Get current timestamp from the PCB
+                let timestamp = pcb.segment_info.timestamp;
+
+                // For each selected PCB, extend and send to children and core neighbors
+                for pcb in selected_pcbs {
+                    // Combine child and core interfaces for propagation
+                    let propagation_interfaces: Vec<_> = child_interfaces.iter()
+                        .chain(core_interfaces.iter())
+                        .copied()
+                        .collect();
+
+                    for iface in propagation_interfaces {
+                        // Loop prevention: skip if AS is already in path
+                        if pcb.get_as_path().contains(&iface.neighbor_isd_as) {
+                            continue;
+                        }
+
+                        // Extend PCB with this AS's hop entry
+                        let mut extended_pcb = extend_pcb(
+                            pcb.clone(),
+                            self.isd_as,
+                            iface.interface_id,
+                            iface.interface_id,
+                            iface.mtu,
+                            timestamp,
+                        );
+
+                        // Add peering entries if available
+                        if !peering_entries.is_empty() {
+                            extended_pcb = add_peering_entries(
+                                extended_pcb,
+                                peering_entries.clone(),
+                                timestamp
+                            );
+                        }
+
+                        // Create BeaconPropagation event
+                        events.push(Event::scion(
+                            T::default(),
+                            from,  // Not self.router_id - we track original source
+                            iface.neighbor_router,
+                            ScionEvent::BeaconPropagation {
+                                src: from,
+                                dst: iface.neighbor_router,
+                                pcb: extended_pcb,
+                            }
+                        ));
+                    }
+                }
+
+                Ok(events)
+            }
+
+            ScionEvent::SegmentRegistration { segment, .. } => {
+                // Store segment in path database
+                self.path_database.register_segment(segment);
+                // Registration doesn't cascade (no new events)
+                Ok(vec![])
+            }
+
+            ScionEvent::PathLookupRequest { .. } => {
+                // TODO: Implement path lookup request handling
+                // For now, path lookup is synchronous (not event-driven)
+                Ok(vec![])
+            }
+
+            ScionEvent::PathLookupResponse { .. } => {
+                // TODO: Implement path lookup response handling
+                Ok(vec![])
+            }
+
+            ScionEvent::CoreBeaconTrigger { .. } => {
+                // Core AS creates initial PCBs and sends to all neighbors
+                if !self.is_core {
+                    // Only core ASes respond to this trigger
+                    return Ok(vec![]);
+                }
+
+                let mut events = Vec::new();
+                let all_interfaces = self.get_all_interfaces();
+
+                // Get current timestamp (use stored or default)
+                let timestamp = self.last_core_beacon_time.unwrap_or(1000);
+
+                for interface in all_interfaces {
+                    // Create initial PCB for this interface
+                    let pcb = super::beaconing::create_initial_pcb(
+                        self.isd_as,
+                        timestamp,
+                        interface.interface_id,
+                        interface.mtu,
+                    );
+
+                    // Send to neighbor
+                    events.push(Event::scion(
+                        T::default(),
+                        interface.neighbor_router,  // Source is this router
+                        interface.neighbor_router,
+                        ScionEvent::BeaconPropagation {
+                            src: interface.neighbor_router,
+                            dst: interface.neighbor_router,
+                            pcb,
+                        }
+                    ));
+                }
+
+                self.last_core_beacon_time = Some(timestamp);
+                Ok(events)
+            }
+
+            ScionEvent::IntraIsdBeaconTrigger { .. } => {
+                // Triggered propagation (for periodic beaconing)
+                // This would select and propagate stored PCBs
+                // For now, propagation happens reactively on BeaconPropagation events
+                Ok(vec![])
+            }
+
+            ScionEvent::RegistrationTrigger { .. } => {
+                // Triggered registration (for periodic operations)
+                // TODO: Implement periodic registration
+                Ok(vec![])
+            }
+        }
+    }
 }
 
 #[cfg(test)]

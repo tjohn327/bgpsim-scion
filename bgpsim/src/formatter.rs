@@ -552,6 +552,13 @@ impl<'n, P: Prefix, Q, Ospf: OspfImpl, T: FmtPriority> NetworkFormatter<'n, P, Q
                 e.fmt(net),
                 p.fmt()
             ),
+            Event::Scion { p, src, dst, e } => format!(
+                "SCION Event: {} -> {}: {:?} {}",
+                src.fmt(net),
+                dst.fmt(net),
+                e,
+                p.fmt()
+            ),
         }
     }
 }

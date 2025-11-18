@@ -29,6 +29,7 @@ pub use rand_queue::{GeoTimingModel, ModelParams, SimpleTimingModel};
 use crate::{
     bgp::BgpEvent,
     ospf::{local::OspfEvent, OspfArea},
+    scion::ScionEvent,
     types::{IntoIpv4Prefix, Ipv4Prefix, Prefix, RouterId, StepUpdate},
 };
 
@@ -65,6 +66,18 @@ pub enum Event<P: Prefix, T> {
         /// The specific OSPF event.
         e: OspfEvent,
     },
+    /// SCION Event from `src` to `dst`.
+    Scion {
+        /// The priority (time). Can be ignored when handling events, (unless you implement a custom
+        /// queue).
+        p: T,
+        /// The source of the message
+        src: RouterId,
+        /// The target of the message
+        dst: RouterId,
+        /// The specific SCION event.
+        e: ScionEvent<P>,
+    },
 }
 
 impl<P: Prefix, T> Event<P, T> {
@@ -84,6 +97,11 @@ impl<P: Prefix, T> Event<P, T> {
         }
     }
 
+    /// Create a new SCION event
+    pub fn scion(p: T, src: RouterId, dst: RouterId, e: ScionEvent<P>) -> Self {
+        Self::Scion { p, src, dst, e }
+    }
+
     /// Returns the prefix for which this event talks about.
     pub fn prefix(&self) -> Option<P> {
         match self {
@@ -96,20 +114,21 @@ impl<P: Prefix, T> Event<P, T> {
                 ..
             } => Some(*prefix),
             Event::Ospf { .. } => None,
+            Event::Scion { .. } => None, // SCION doesn't use prefixes
         }
     }
 
     /// Get a reference to the priority of this event.
     pub fn priority(&self) -> &T {
         match self {
-            Event::Bgp { p, .. } | Event::Ospf { p, .. } => p,
+            Event::Bgp { p, .. } | Event::Ospf { p, .. } | Event::Scion { p, .. } => p,
         }
     }
 
     /// Get a reference to the priority of this event.
     pub fn priority_mut(&mut self) -> &mut T {
         match self {
-            Event::Bgp { p, .. } | Event::Ospf { p, .. } => p,
+            Event::Bgp { p, .. } | Event::Ospf { p, .. } | Event::Scion { p, .. } => p,
         }
     }
 
@@ -118,17 +137,22 @@ impl<P: Prefix, T> Event<P, T> {
         matches!(self, Event::Bgp { .. })
     }
 
+    /// Returns true if the event is a SCION message
+    pub fn is_scion_event(&self) -> bool {
+        matches!(self, Event::Scion { .. })
+    }
+
     /// Return the source of the event.
     pub fn source(&self) -> RouterId {
         match self {
-            Event::Bgp { src, .. } | Event::Ospf { src, .. } => *src,
+            Event::Bgp { src, .. } | Event::Ospf { src, .. } | Event::Scion { src, .. } => *src,
         }
     }
 
     /// Return the router where the event is processed
     pub fn router(&self) -> RouterId {
         match self {
-            Event::Bgp { dst, .. } | Event::Ospf { dst, .. } => *dst,
+            Event::Bgp { dst, .. } | Event::Ospf { dst, .. } | Event::Scion { dst, .. } => *dst,
         }
     }
 }
@@ -155,6 +179,12 @@ impl<P: Prefix, T> IntoIpv4Prefix for Event<P, T> {
                 dst,
                 area,
                 e,
+            },
+            Event::Scion { src, dst, e, .. } => Event::Scion {
+                p: (),
+                src,
+                dst,
+                e: e.into_ipv4_prefix(),
             },
         }
     }

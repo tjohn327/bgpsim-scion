@@ -231,7 +231,17 @@ impl<P: Prefix, Ospf: OspfProcess> Router<P, Ospf> {
                     Ok((StepUpdate::Unchanged, ospf_events))
                 }
             }
-            Event::Bgp { dst, .. } | Event::Ospf { dst, .. } => {
+            Event::Scion { src, dst, e, .. } if dst == self.router_id => {
+                // handle SCION event
+                if let Some(scion) = self.scion.as_mut() {
+                    let events = scion.handle_event(src, e)?;
+                    // SCION doesn't affect BGP forwarding state
+                    Ok((StepUpdate::Unchanged, events))
+                } else {
+                    Err(DeviceError::RouterNotFound(self.router_id))
+                }
+            }
+            Event::Bgp { dst, .. } | Event::Ospf { dst, .. } | Event::Scion { dst, .. } => {
                 Err(DeviceError::WrongRouter(self.router_id, dst))
             }
         }

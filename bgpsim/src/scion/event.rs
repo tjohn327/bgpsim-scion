@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::scion::path_segment::{PathSegment, SegmentType};
 use crate::scion::pcb::Pcb;
 use crate::scion::types::IsdAs;
-use crate::types::{Prefix, RouterId};
+use crate::types::{IntoIpv4Prefix, Ipv4Prefix, Prefix, RouterId};
 
 /// SCION Control Plane events.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "P: Serialize",
     deserialize = "P: for<'a> serde::Deserialize<'a>"
@@ -157,6 +157,54 @@ impl<P: Prefix> ScionEvent<P> {
             self,
             ScionEvent::PathLookupRequest { .. } | ScionEvent::PathLookupResponse { .. }
         )
+    }
+}
+
+impl<P: Prefix> IntoIpv4Prefix for ScionEvent<P> {
+    type T = ScionEvent<Ipv4Prefix>;
+
+    fn into_ipv4_prefix(self) -> Self::T {
+        match self {
+            ScionEvent::BeaconPropagation { src, dst, pcb } => ScionEvent::BeaconPropagation {
+                src,
+                dst,
+                pcb: pcb.into_ipv4_prefix(),
+            },
+            ScionEvent::SegmentRegistration {
+                registering_as,
+                target_core,
+                segment,
+            } => ScionEvent::SegmentRegistration {
+                registering_as,
+                target_core,
+                segment: segment.into_ipv4_prefix(),
+            },
+            ScionEvent::PathLookupRequest {
+                src,
+                dst_isd_as,
+                segment_type,
+            } => ScionEvent::PathLookupRequest {
+                src,
+                dst_isd_as,
+                segment_type,
+            },
+            ScionEvent::PathLookupResponse {
+                requester,
+                responder,
+                segments,
+            } => ScionEvent::PathLookupResponse {
+                requester,
+                responder,
+                segments: segments.into_iter().map(|s| s.into_ipv4_prefix()).collect(),
+            },
+            ScionEvent::CoreBeaconTrigger { core_as } => ScionEvent::CoreBeaconTrigger { core_as },
+            ScionEvent::IntraIsdBeaconTrigger { as_router } => {
+                ScionEvent::IntraIsdBeaconTrigger { as_router }
+            }
+            ScionEvent::RegistrationTrigger { as_router } => {
+                ScionEvent::RegistrationTrigger { as_router }
+            }
+        }
     }
 }
 

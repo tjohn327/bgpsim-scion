@@ -266,6 +266,7 @@ mod t2 {
                     assert_eq!(prefix, P::from(200));
                 }
                 Event::Ospf { .. } => unreachable!(),
+                Event::Scion { .. } => unreachable!(),
             }
         }
 
@@ -329,6 +330,7 @@ mod t2 {
                     assert_eq!(prefix, P::from(200));
                 }
                 Event::Ospf { .. } => unreachable!(),
+                Event::Scion { .. } => unreachable!(),
             }
         }
 

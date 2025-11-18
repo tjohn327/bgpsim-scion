@@ -23,7 +23,7 @@ use std::collections::HashSet;
 
 use crate::scion::pcb::{HopField, Pcb, SegmentInfo};
 use crate::scion::types::{InterfaceId, IsdAs};
-use crate::types::Prefix;
+use crate::types::{IntoIpv4Prefix, Ipv4Prefix, Prefix};
 
 /// Type of SCION path segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,7 +50,7 @@ impl std::fmt::Display for SegmentType {
 ///
 /// Path segments can be registered and later looked up to construct
 /// end-to-end forwarding paths.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PathSegment<P: Prefix> {
     /// Type of segment
     pub segment_type: SegmentType,
@@ -323,7 +323,7 @@ impl<P: Prefix> PathSegment<P> {
 }
 
 /// Information about a peering shortcut available in a path segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeeringShortcut {
     /// Position in the segment where peering is available
     pub position: usize,
@@ -335,6 +335,23 @@ pub struct PeeringShortcut {
     pub peer_mtu: u16,
     /// Hop field for the peering link
     pub hop_field: HopField,
+}
+
+impl<P: Prefix> IntoIpv4Prefix for PathSegment<P> {
+    type T = PathSegment<Ipv4Prefix>;
+
+    fn into_ipv4_prefix(self) -> Self::T {
+        PathSegment {
+            segment_type: self.segment_type,
+            info: self.info,
+            hop_fields: self.hop_fields,
+            as_path: self.as_path,
+            peering_options: self.peering_options,
+            expiration: self.expiration,
+            mtu: self.mtu,
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 /// A complete end-to-end forwarding path.

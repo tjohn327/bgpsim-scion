@@ -119,6 +119,8 @@ impl<P: Prefix> EventQueue<P> for SimpleTimingModel<P> {
             }
             // Nothing to do for OSPF
             Event::Ospf { .. } => {}
+            // Nothing to do for SCION
+            Event::Scion { .. } => {}
         }
         Some(event)
     }
@@ -482,6 +484,23 @@ impl<P: Prefix> EventQueue<P> for GeoTimingModel<P> {
                 // update the time
                 *t = next_time;
             }
+            Event::Scion {
+                p: ref mut t,
+                src,
+                dst,
+                ..
+            } => {
+                // compute the propagation time
+                next_time += self.propagation_time(src, dst, &mut rng);
+                // compute the processing time
+                let beta = self
+                    .processing_params
+                    .get_mut(&src)
+                    .unwrap_or(&mut self.default_processing_params);
+                next_time += NotNan::new(beta.sample(&mut rng)).unwrap();
+                // update the time
+                *t = next_time;
+            }
         }
         // enqueue with the computed time
         self.q.push(event, Reverse(next_time));
@@ -498,6 +517,8 @@ impl<P: Prefix> EventQueue<P> for GeoTimingModel<P> {
             }
             // Nothing to do for OSPF
             Event::Ospf { .. } => {}
+            // Nothing to do for SCION
+            Event::Scion { .. } => {}
         }
         Some(event)
     }

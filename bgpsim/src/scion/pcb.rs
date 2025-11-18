@@ -22,13 +22,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::scion::types::{InterfaceId, IsdAs};
-use crate::types::Prefix;
+use crate::types::{IntoIpv4Prefix, Ipv4Prefix, Prefix};
 
 /// Path Construction Beacon - the core routing message in SCION.
 ///
 /// PCBs are initiated by core ASes and propagated through the network,
 /// accumulating cryptographically protected path information at each AS.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pcb<P: Prefix> {
     /// Segment information
     pub segment_info: SegmentInfo,
@@ -186,7 +186,7 @@ impl std::fmt::Display for PcbValidationError {
 impl std::error::Error for PcbValidationError {}
 
 /// Segment information contained in a PCB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SegmentInfo {
     /// Timestamp when the PCB was created (in seconds)
     pub timestamp: u32,
@@ -208,7 +208,7 @@ impl SegmentInfo {
 }
 
 /// Flags for segment properties
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SegmentFlags {
     /// Reserved for future use
     pub reserved: u16,
@@ -224,7 +224,7 @@ impl Default for SegmentFlags {
 ///
 /// Hop fields are used in the data plane for packet forwarding and
 /// are authenticated with a MAC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HopField {
     /// Ingress interface ID (in beaconing direction)
     pub ingress: InterfaceId,
@@ -271,7 +271,7 @@ impl HopField {
 }
 
 /// Hop entry combining hop field with MTU information.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HopEntry {
     /// The hop field
     pub hop_field: HopField,
@@ -296,7 +296,7 @@ impl HopEntry {
 }
 
 /// AS entry in a PCB representing one hop in the path.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AsEntry {
     /// ISD-AS of this AS
     pub isd_as: IsdAs,
@@ -345,7 +345,7 @@ impl AsEntry {
 }
 
 /// Peer entry describing a peering link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerEntry {
     /// ISD-AS of the peer
     pub peer_isd_as: IsdAs,
@@ -378,10 +378,23 @@ impl PeerEntry {
 ///
 /// Initially empty, but can be extended with things like StaticInfoExtension
 /// for latency, bandwidth, geolocation, etc.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct PcbExtensions {
     /// Reserved for future extensions
     _reserved: (),
+}
+
+impl<P: Prefix> IntoIpv4Prefix for Pcb<P> {
+    type T = Pcb<Ipv4Prefix>;
+
+    fn into_ipv4_prefix(self) -> Self::T {
+        Pcb {
+            segment_info: self.segment_info,
+            as_entries: self.as_entries,
+            extensions: self.extensions,
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 #[cfg(test)]
