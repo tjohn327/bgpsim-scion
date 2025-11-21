@@ -228,7 +228,8 @@ impl Component for Tooltip {
             }
             #[cfg(feature = "scion")]
             Hover::ScionPath(path) => {
-                let path_str = path.iter()
+                let path_str = path
+                    .iter()
                     .map(|r| r.fmt(&self.net.net()).to_string())
                     .collect::<Vec<_>>()
                     .join(" → ");

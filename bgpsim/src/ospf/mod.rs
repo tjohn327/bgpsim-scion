@@ -1491,6 +1491,9 @@ impl<P: Prefix, Q: crate::event::EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Os
             stop_after: self.stop_after,
             queue: self.queue,
             skip_queue: self.skip_queue,
+            scion_ases: self.scion_ases,
+            scion_mode: self.scion_mode,
+            scion_core_diameter: self.scion_core_diameter,
         })
     }
 }

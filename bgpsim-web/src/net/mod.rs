@@ -296,9 +296,9 @@ impl Net {
         let net = self.net.borrow();
         net.indices()
             .filter_map(|id| {
-                net.get_router(id).ok().and_then(|r| {
-                    r.scion().map(|cs| (id, cs.isd_as, cs.is_core))
-                })
+                net.get_router(id)
+                    .ok()
+                    .and_then(|r| r.scion().map(|cs| (id, cs.isd_as, cs.is_core)))
             })
             .collect()
     }
@@ -310,8 +310,12 @@ impl Net {
         let mut links = Vec::new();
 
         for src in net.indices() {
-            let Ok(src_router) = net.get_router(src) else { continue };
-            let Some(src_scion) = src_router.scion() else { continue };
+            let Ok(src_router) = net.get_router(src) else {
+                continue;
+            };
+            let Some(src_scion) = src_router.scion() else {
+                continue;
+            };
 
             for interface in src_scion.get_all_interfaces() {
                 let dst = interface.neighbor_router;
@@ -328,9 +332,11 @@ impl Net {
     #[cfg(feature = "scion")]
     pub fn get_isds(&self) -> Vec<bgpsim::scion::IsdNumber> {
         let net = self.net.borrow();
-        let mut isds: Vec<_> = net.indices()
+        let mut isds: Vec<_> = net
+            .indices()
             .filter_map(|id| {
-                net.get_router(id).ok()
+                net.get_router(id)
+                    .ok()
                     .and_then(|r| r.scion().map(|cs| cs.isd_as.isd))
             })
             .collect();

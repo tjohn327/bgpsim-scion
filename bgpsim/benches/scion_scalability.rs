@@ -1,8 +1,8 @@
 // SCION Scalability Benchmark
 // Tests SCION performance at 1000, 10k, 100k, and 1M routers
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use bgpsim::prelude::*;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
 
 #[cfg(feature = "scion")]
@@ -19,14 +19,16 @@ fn generate_scalable_topology(
     let ases_per_isd = size / num_isds;
     let core_ratio = 0.05; // 5% core ASes
     let transit_ratio = 0.25; // 25% transit ASes
-    // rest are leaf ASes
+                              // rest are leaf ASes
 
     let core_per_isd = (ases_per_isd as f64 * core_ratio).ceil().max(2.0) as usize;
     let transit_per_isd = (ases_per_isd as f64 * transit_ratio).ceil() as usize;
     let leaf_per_isd = ases_per_isd - core_per_isd - transit_per_isd;
 
-    println!("  Topology: {} ISDs, {} core/ISD, {} transit/ISD, {} leaf/ISD",
-             num_isds, core_per_isd, transit_per_isd, leaf_per_isd);
+    println!(
+        "  Topology: {} ISDs, {} core/ISD, {} transit/ISD, {} leaf/ISD",
+        num_isds, core_per_isd, transit_per_isd, leaf_per_isd
+    );
 
     let mut all_cores = Vec::new();
     let mut all_transits = Vec::new();
@@ -102,9 +104,11 @@ fn generate_scalable_topology(
         }
     }
 
-    println!("  Created {} routers, {} links",
-             net.indices().count(),
-             net.ospf_network().edges().count());
+    println!(
+        "  Created {} routers, {} links",
+        net.indices().count(),
+        net.ospf_network().edges().count()
+    );
 
     Ok(net)
 }
@@ -139,7 +143,8 @@ fn enable_scion(
     for router in net.indices() {
         for neighbor_edge in net.ospf_network().neighbors(router) {
             let neighbor = neighbor_edge.src();
-            if router.index() < neighbor.index() { // Only configure each link once
+            if router.index() < neighbor.index() {
+                // Only configure each link once
                 // Determine link type based on router indices
                 let link_type = if is_core_router(router, size) && is_core_router(neighbor, size) {
                     ScionLinkType::Core
@@ -175,15 +180,9 @@ fn bench_topology_creation(c: &mut Criterion) {
 
     for size in [100, 1_000, 10_000].iter() {
         group.throughput(Throughput::Elements(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, &size| {
-                b.iter(|| {
-                    generate_scalable_topology(black_box(size)).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
+            b.iter(|| generate_scalable_topology(black_box(size)).unwrap());
+        });
     }
 
     group.finish();
@@ -197,17 +196,13 @@ fn bench_scion_setup(c: &mut Criterion) {
 
     for size in [100, 1_000].iter() {
         group.throughput(Throughput::Elements(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, &size| {
-                let mut net = generate_scalable_topology(size).unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
+            let mut net = generate_scalable_topology(size).unwrap();
 
-                b.iter(|| {
-                    enable_scion(&mut net, size).unwrap();
-                });
-            },
-        );
+            b.iter(|| {
+                enable_scion(&mut net, size).unwrap();
+            });
+        });
     }
 
     group.finish();
@@ -227,15 +222,11 @@ fn bench_scion_beaconing(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         // Core beaconing
-        group.bench_with_input(
-            BenchmarkId::new("core_beaconing", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    net.scion_core_beaconing(black_box(1000)).unwrap();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("core_beaconing", size), size, |b, _| {
+            b.iter(|| {
+                net.scion_core_beaconing(black_box(1000)).unwrap();
+            });
+        });
 
         // Intra-ISD beaconing
         group.bench_with_input(
@@ -246,25 +237,22 @@ fn bench_scion_beaconing(c: &mut Criterion) {
                 net.scion_core_beaconing(1000).unwrap();
 
                 b.iter(|| {
-                    net.scion_intra_isd_beaconing(black_box(1000), black_box(5)).unwrap();
+                    net.scion_intra_isd_beaconing(black_box(1000), black_box(5))
+                        .unwrap();
                 });
             },
         );
 
         // Registration
-        group.bench_with_input(
-            BenchmarkId::new("registration", size),
-            size,
-            |b, _| {
-                // Setup
-                net.scion_core_beaconing(1000).unwrap();
-                net.scion_intra_isd_beaconing(1000, 5).unwrap();
+        group.bench_with_input(BenchmarkId::new("registration", size), size, |b, _| {
+            // Setup
+            net.scion_core_beaconing(1000).unwrap();
+            net.scion_intra_isd_beaconing(1000, 5).unwrap();
 
-                b.iter(|| {
-                    net.scion_registration_round(black_box(5)).unwrap();
-                });
-            },
-        );
+            b.iter(|| {
+                net.scion_registration_round(black_box(5)).unwrap();
+            });
+        });
     }
 
     group.finish();
@@ -289,22 +277,16 @@ fn bench_scion_path_lookup(c: &mut Criterion) {
         let routers: Vec<_> = net.indices().take(10).collect();
 
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    for i in 0..routers.len() {
-                        for j in (i + 1)..routers.len() {
-                            let _ = net.scion_lookup_paths(
-                                black_box(routers[i]),
-                                black_box(routers[j])
-                            );
-                        }
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| {
+                for i in 0..routers.len() {
+                    for j in (i + 1)..routers.len() {
+                        let _ =
+                            net.scion_lookup_paths(black_box(routers[i]), black_box(routers[j]));
                     }
-                });
-            },
-        );
+                }
+            });
+        });
     }
 
     group.finish();
@@ -349,7 +331,8 @@ fn bench_extreme_scalability(c: &mut Criterion) {
 
         // Intra-ISD beaconing
         let intra_start = std::time::Instant::now();
-        if let Err(e) = net.scion_intra_isd_beaconing(1000, 3) { // Fewer PCBs for scalability
+        if let Err(e) = net.scion_intra_isd_beaconing(1000, 3) {
+            // Fewer PCBs for scalability
             println!("Intra-ISD beaconing failed: {:?}", e);
             continue;
         }
@@ -357,7 +340,8 @@ fn bench_extreme_scalability(c: &mut Criterion) {
 
         // Registration
         let reg_start = std::time::Instant::now();
-        if let Err(e) = net.scion_registration_round(3) { // Fewer segments
+        if let Err(e) = net.scion_registration_round(3) {
+            // Fewer segments
             println!("Registration failed: {:?}", e);
             continue;
         }
@@ -374,12 +358,17 @@ fn bench_extreme_scalability(c: &mut Criterion) {
                 }
             }
         }
-        println!("Path lookup (10 pairs): {:?}, avg {} paths/pair",
-                 lookup_start.elapsed(),
-                 path_count / 10);
+        println!(
+            "Path lookup (10 pairs): {:?}, avg {} paths/pair",
+            lookup_start.elapsed(),
+            path_count / 10
+        );
 
-        println!("=== Total time for {}: {:?} ===\n",
-                 size, scion_start.elapsed());
+        println!(
+            "=== Total time for {}: {:?} ===\n",
+            size,
+            scion_start.elapsed()
+        );
     }
 
     group.finish();
@@ -396,9 +385,6 @@ criterion_group!(
 );
 
 #[cfg(not(feature = "scion"))]
-criterion_group!(
-    benches,
-    bench_topology_creation
-);
+criterion_group!(benches, bench_topology_creation);
 
 criterion_main!(benches);

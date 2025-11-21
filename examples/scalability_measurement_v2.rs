@@ -9,11 +9,11 @@
 //   - Topology-aware beaconing rounds based on hierarchy depth
 //   - Registration limit = 50 segments
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 use std::time::Instant;
 
 struct IsdTopology {
@@ -30,7 +30,7 @@ fn main() -> Result<(), NetworkError> {
     println!("  max_pcbs = 50 (spec-recommended)");
     println!("  topology-aware beaconing rounds\n");
 
-    // Test sizes
+    // Test sizes (100K enabled with Phase 2 spec-compliant selection!)
     let sizes = vec![100, 1000, 10000, 100000];
 
     for size in sizes {
@@ -53,16 +53,22 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
     let transit_per_isd = (ases_per_isd as f64 * 0.25).ceil() as usize;
     let leaf_per_isd = ases_per_isd.saturating_sub(core_per_isd + transit_per_isd);
 
-    println!("Topology: {} ISDs, {} core/ISD, {} transit/ISD, {} leaf/ISD",
-             num_isds, core_per_isd, transit_per_isd, leaf_per_isd);
+    println!(
+        "Topology: {} ISDs, {} core/ISD, {} transit/ISD, {} leaf/ISD",
+        num_isds, core_per_isd, transit_per_isd, leaf_per_isd
+    );
 
     // 1. Topology Creation (creates routers, links, and enables SCION all together)
     let start = Instant::now();
-    let mut net = create_and_configure_topology(num_isds, core_per_isd, transit_per_isd, leaf_per_isd)?;
+    let mut net =
+        create_and_configure_topology(num_isds, core_per_isd, transit_per_isd, leaf_per_isd)?;
     let topo_time = start.elapsed();
 
     let actual_routers = net.indices().count();
-    println!("1. Topology creation & SCION enablement: {:.3}s", topo_time.as_secs_f64());
+    println!(
+        "1. Topology creation & SCION enablement: {:.3}s",
+        topo_time.as_secs_f64()
+    );
     println!("   Created {} routers", actual_routers);
 
     // Debug: Count SCION-enabled routers
@@ -78,7 +84,10 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
             }
         }
     }
-    println!("   SCION enabled: {} routers ({} core)", scion_count, core_count);
+    println!(
+        "   SCION enabled: {} routers ({} core)",
+        scion_count, core_count
+    );
 
     // 2. Combined Beaconing (Core + Intra-ISD interleaved)
     let hierarchy_depth = estimate_hierarchy_depth(core_per_isd, transit_per_isd, leaf_per_isd);
@@ -110,9 +119,18 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
     }
 
     let beaconing_time = start_beaconing.elapsed();
-    println!("2. Beaconing (interleaved): {:.3}s", beaconing_time.as_secs_f64());
-    println!("   - Inter-ISD rounds: {} (for {} ISDs)", inter_isd_rounds, num_isds);
-    println!("   - Intra-ISD rounds per iteration: {} (depth+1)", intra_rounds_per_iter);
+    println!(
+        "2. Beaconing (interleaved): {:.3}s",
+        beaconing_time.as_secs_f64()
+    );
+    println!(
+        "   - Inter-ISD rounds: {} (for {} ISDs)",
+        inter_isd_rounds, num_isds
+    );
+    println!(
+        "   - Intra-ISD rounds per iteration: {} (depth+1)",
+        intra_rounds_per_iter
+    );
     println!("   - Total core PCBs: {}", total_core_pcbs);
     println!("   - Total intra PCBs: {}", total_intra_pcbs);
 
@@ -121,33 +139,45 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
     let (up, down, core) = net.scion_registration_round(50)?;
     let registration_time = start.elapsed();
     println!("3. Registration: {:.3}s", registration_time.as_secs_f64());
-    println!("   Registered: {} up, {} down, {} core segments", up, down, core);
+    println!(
+        "   Registered: {} up, {} down, {} core segments",
+        up, down, core
+    );
 
     // 4. Path Lookup
     println!("4. Path lookup (preparing...)");
 
     // Adaptive query count based on network size
     let query_routers = if size >= 10000 {
-        3  // For 10k+: 3 routers = 3 queries
+        3 // For 10k+: 3 routers = 3 queries
     } else if size >= 1000 {
-        4  // For 1k: 4 routers = 6 queries
+        4 // For 1k: 4 routers = 6 queries
     } else {
-        5  // For <1k: 5 routers = 10 queries
+        5 // For <1k: 5 routers = 10 queries
     };
 
-    let routers: Vec<_> = net.indices().take(query_routers.min(actual_routers)).collect();
+    let routers: Vec<_> = net
+        .indices()
+        .take(query_routers.min(actual_routers))
+        .collect();
     println!("   Selected {} routers for testing", routers.len());
 
     let mut lookup_times = Vec::new();
     let max_queries = routers.len().min(query_routers);
     let total_queries = max_queries * (max_queries - 1) / 2;
 
-    println!("   Will test {} queries (pairs from first {} routers)", total_queries, max_queries);
+    println!(
+        "   Will test {} queries (pairs from first {} routers)",
+        total_queries, max_queries
+    );
 
     for i in 0..routers.len().min(query_routers) {
-        for j in (i+1)..routers.len().min(query_routers) {
+        for j in (i + 1)..routers.len().min(query_routers) {
             let query_num = lookup_times.len() + 1;
-            println!("   Query {}/{}: router[{}] -> router[{}]", query_num, total_queries, i, j);
+            println!(
+                "   Query {}/{}: router[{}] -> router[{}]",
+                query_num, total_queries, i, j
+            );
 
             let start = Instant::now();
             println!("      Looking up path segments (spec-compliant)...");
@@ -156,11 +186,13 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
             let segments = net.scion_lookup_path_segments(routers[i], routers[j])?;
             let lookup_time = start.elapsed();
 
-            println!("      -> Found {} up, {} core, {} down segments in {:.6}s",
+            println!(
+                "      -> Found {} up, {} core, {} down segments in {:.6}s",
                 segments.up_segments.len(),
                 segments.core_segments.len(),
                 segments.down_segments.len(),
-                lookup_time.as_secs_f64());
+                lookup_time.as_secs_f64()
+            );
 
             // Estimate potential paths (without materializing them all)
             let potential_paths = segments.up_segments.len().max(1)
@@ -177,11 +209,83 @@ fn measure_scale(size: usize) -> Result<(), NetworkError> {
     } else {
         std::time::Duration::from_secs(0)
     };
-    println!("   Average lookup time ({} queries): {:.6}s", lookup_times.len(), avg_lookup.as_secs_f64());
+    println!(
+        "   Average lookup time ({} queries): {:.6}s",
+        lookup_times.len(),
+        avg_lookup.as_secs_f64()
+    );
 
-    // Total time
-    let total = topo_time + beaconing_time + registration_time;
-    println!("\nTotal setup time: {:.3}s", total.as_secs_f64());
+    // Total time (batch mode)
+    let total_batch = topo_time + beaconing_time + registration_time;
+    println!(
+        "\nTotal setup time (batch mode): {:.3}s",
+        total_batch.as_secs_f64()
+    );
+
+    // === EVENT-DRIVEN BEACONING COMPARISON ===
+    println!("\n{}", "─".repeat(60));
+    println!("EVENT-DRIVEN BEACONING (NEW)");
+    println!("{}", "─".repeat(60));
+
+    // Create new network with same topology for fair comparison
+    let start_topo = Instant::now();
+    let mut net_event =
+        create_and_configure_topology(num_isds, core_per_isd, transit_per_isd, leaf_per_isd)?;
+    let topo_time_event = start_topo.elapsed();
+    println!(
+        "1. Topology creation: {:.3}s",
+        topo_time_event.as_secs_f64()
+    );
+
+    // Event-driven beaconing
+    let start_event_beaconing = Instant::now();
+    let core_count = net_event.scion_start_beaconing(1000)?;
+    let events_processed = net_event.scion_converge()?;
+    let event_beaconing_time = start_event_beaconing.elapsed();
+
+    println!(
+        "2. Event-driven beaconing: {:.3}s",
+        event_beaconing_time.as_secs_f64()
+    );
+    println!("   - Core ASes: {}", core_count);
+    println!("   - Events processed: {}", events_processed);
+    println!(
+        "   - Speedup vs batch: {:.2}x",
+        beaconing_time.as_secs_f64() / event_beaconing_time.as_secs_f64()
+    );
+
+    // Count PCBs in event-driven mode
+    let mut event_total_pcbs = 0;
+    for r in net_event.indices() {
+        if let Ok(bs) = net_event.get_scion_beacon_store(r) {
+            event_total_pcbs += bs.total_count();
+        }
+    }
+    let batch_total_pcbs = total_core_pcbs + total_intra_pcbs;
+    println!(
+        "   - Total PCBs collected: {} (batch: {})",
+        event_total_pcbs, batch_total_pcbs
+    );
+
+    // Registration
+    let start_reg = Instant::now();
+    let (up_e, down_e, core_e) = net_event.scion_registration_round(50)?;
+    let reg_time_event = start_reg.elapsed();
+    println!("3. Registration: {:.3}s", reg_time_event.as_secs_f64());
+    println!(
+        "   Registered: {} up, {} down, {} core segments",
+        up_e, down_e, core_e
+    );
+
+    let total_event = topo_time_event + event_beaconing_time + reg_time_event;
+    println!(
+        "\nTotal setup time (event-driven): {:.3}s",
+        total_event.as_secs_f64()
+    );
+    println!(
+        "Overall speedup: {:.2}x",
+        total_batch.as_secs_f64() / total_event.as_secs_f64()
+    );
 
     Ok(())
 }
@@ -197,7 +301,7 @@ fn create_and_configure_topology(
 
     // Create routers for each ISD and enable SCION immediately
     for isd_idx in 0..num_isds {
-        let isd_number = (isd_idx + 1) as u16;  // ISDs are 1-based
+        let isd_number = (isd_idx + 1) as u16; // ISDs are 1-based
         let mut isd_topo = IsdTopology {
             isd_number,
             cores: Vec::new(),
@@ -209,14 +313,15 @@ fn create_and_configure_topology(
         for i in 0..core_per_isd {
             let asn = (isd_number as u64 * 100) + i as u64 + 10;
             let router = net.add_router(&format!("ISD{}-Core{}", isd_number, i), ASN(asn as u32));
-            net.enable_scion(router, IsdAs::new(isd_number, asn), true)?;  // Enable SCION immediately
+            net.enable_scion(router, IsdAs::new(isd_number, asn), true)?; // Enable SCION immediately
             isd_topo.cores.push(router);
         }
 
         // Transit ASes
         for i in 0..transit_per_isd {
             let asn = (isd_number as u64 * 100) + (core_per_isd + i) as u64 + 10;
-            let router = net.add_router(&format!("ISD{}-Transit{}", isd_number, i), ASN(asn as u32));
+            let router =
+                net.add_router(&format!("ISD{}-Transit{}", isd_number, i), ASN(asn as u32));
             net.enable_scion(router, IsdAs::new(isd_number, asn), false)?;
             isd_topo.transits.push(router);
         }
@@ -236,9 +341,13 @@ fn create_and_configure_topology(
     for isd_topo in &all_isds {
         // Core mesh
         for i in 0..isd_topo.cores.len() {
-            for j in (i+1)..isd_topo.cores.len() {
+            for j in (i + 1)..isd_topo.cores.len() {
                 net.add_link(isd_topo.cores[i], isd_topo.cores[j])?;
-                net.configure_scion_link(isd_topo.cores[i], isd_topo.cores[j], ScionLinkType::Core)?;
+                net.configure_scion_link(
+                    isd_topo.cores[i],
+                    isd_topo.cores[j],
+                    ScionLinkType::Core,
+                )?;
             }
         }
 
@@ -262,7 +371,11 @@ fn create_and_configure_topology(
         let next = (i + 1) % all_isds.len();
         if next != i && !all_isds[i].cores.is_empty() && !all_isds[next].cores.is_empty() {
             net.add_link(all_isds[i].cores[0], all_isds[next].cores[0])?;
-            net.configure_scion_link(all_isds[i].cores[0], all_isds[next].cores[0], ScionLinkType::Core)?;
+            net.configure_scion_link(
+                all_isds[i].cores[0],
+                all_isds[next].cores[0],
+                ScionLinkType::Core,
+            )?;
         }
     }
 
@@ -271,8 +384,14 @@ fn create_and_configure_topology(
 
 fn estimate_hierarchy_depth(core_count: usize, transit_count: usize, leaf_count: usize) -> usize {
     let mut depth: usize = 0;
-    if core_count > 0 { depth += 1; }
-    if transit_count > 0 { depth += 1; }
-    if leaf_count > 0 { depth += 1; }
+    if core_count > 0 {
+        depth += 1;
+    }
+    if transit_count > 0 {
+        depth += 1;
+    }
+    if leaf_count > 0 {
+        depth += 1;
+    }
     depth.saturating_sub(1).max(2)
 }

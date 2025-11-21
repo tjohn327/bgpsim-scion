@@ -16,6 +16,7 @@
 //! SCION control plane state management including beacon storage and path database.
 
 use std::collections::HashMap;
+use std::mem;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,7 @@ use crate::types::Prefix;
 use super::{
     path_segment::{PathSegment, SegmentType},
     pcb::Pcb,
-    types::IsdAs,
+    types::{InterfaceId, IsdAs},
 };
 
 /// Storage for Path Construction Beacons (PCBs).
@@ -58,7 +59,16 @@ impl<P: Prefix> BeaconStore<P> {
 
     /// Create a new beacon store with default capacity limits.
     pub fn default() -> Self {
-        Self::new(20, 1000)
+        // Spec (SCION CP §2.3.4) recommends keeping up to 50 PCBs per parent-child link.
+        // Allow more total PCBs so large core networks remain stable.
+        Self::new(50, 5000)
+    }
+
+    /// Reconfigure the maximum capacity and trim current entries to the new limits.
+    pub fn configure_limits(&mut self, max_per_source: usize, max_total: usize) {
+        self.max_per_source = max_per_source;
+        self.max_total = max_total;
+        self.trim_to_limits();
     }
 
     /// Insert a PCB into the store.
@@ -103,10 +113,59 @@ impl<P: Prefix> BeaconStore<P> {
 
     /// Get all PCBs in the store.
     pub fn get_all(&self) -> Vec<&Pcb<P>> {
-        self.beacons
-            .values()
-            .flat_map(|pcbs| pcbs.iter())
-            .collect()
+        self.beacons.values().flat_map(|pcbs| pcbs.iter()).collect()
+    }
+
+    /// Remove a PCB matching the provided origin and AS-path/timestamp.
+    pub fn remove_pcb(&mut self, origin: &IsdAs, pcb: &Pcb<P>) -> bool {
+        let mut removed = false;
+        let mut should_remove_entry = false;
+        if let Some(pcbs) = self.beacons.get_mut(origin) {
+            let before = pcbs.len();
+            pcbs.retain(|existing| {
+                !(existing.segment_info.timestamp == pcb.segment_info.timestamp
+                    && existing.get_as_path() == pcb.get_as_path())
+            });
+            removed = before != pcbs.len();
+            should_remove_entry = pcbs.is_empty();
+        }
+
+        if should_remove_entry {
+            self.beacons.remove(origin);
+        }
+
+        removed
+    }
+
+    fn trim_to_limits(&mut self) {
+        if self.beacons.is_empty() {
+            return;
+        }
+
+        let mut trimmed = HashMap::new();
+        let mut total = 0usize;
+
+        for (origin, mut pcbs) in mem::take(&mut self.beacons) {
+            if total >= self.max_total {
+                break;
+            }
+
+            if pcbs.len() > self.max_per_source {
+                pcbs.truncate(self.max_per_source);
+            }
+
+            let remaining = self.max_total.saturating_sub(total);
+            if pcbs.len() > remaining {
+                pcbs.truncate(remaining);
+            }
+
+            total += pcbs.len();
+            if !pcbs.is_empty() {
+                trimmed.insert(origin, pcbs);
+            }
+        }
+
+        self.beacons = trimmed;
     }
 
     /// Remove expired PCBs based on current time.
@@ -151,6 +210,40 @@ impl<P: Prefix> BeaconStore<P> {
     pub fn sources(&self) -> Vec<IsdAs> {
         self.beacons.keys().copied().collect()
     }
+
+    /// Get all PCBs that lead to a specific destination ISD.
+    ///
+    /// Groups beacons by their origin (destination) ISD.
+    /// This is used for spec-compliant selection (§ 6.1.2: "at most 5 path segments per destination").
+    pub fn get_by_destination(&self, dest_isd: super::types::IsdNumber) -> Vec<&Pcb<P>> {
+        self.beacons
+            .values()
+            .flat_map(|pcbs| pcbs.iter())
+            .filter(|pcb| {
+                if let Some(origin) = pcb.get_origin() {
+                    origin.isd == dest_isd
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    /// Get all unique destination ISDs in the beacon store.
+    pub fn get_destination_isds(&self) -> Vec<super::types::IsdNumber> {
+        use std::collections::HashSet;
+        let mut isds: HashSet<super::types::IsdNumber> = HashSet::new();
+
+        for pcbs in self.beacons.values() {
+            for pcb in pcbs {
+                if let Some(origin) = pcb.get_origin() {
+                    isds.insert(origin.isd);
+                }
+            }
+        }
+
+        isds.into_iter().collect()
+    }
 }
 
 /// Storage for registered path segments.
@@ -168,6 +261,10 @@ pub struct PathDatabase<P: Prefix> {
     core_segments: Vec<PathSegment<P>>,
     /// Maximum number of segments per type
     max_per_type: usize,
+    /// Maximum number of up/down segments returned by lookups
+    up_down_lookup_limit: usize,
+    /// Maximum number of core segments returned by lookups
+    core_lookup_limit: usize,
 }
 
 impl<P: Prefix> PathDatabase<P> {
@@ -178,12 +275,45 @@ impl<P: Prefix> PathDatabase<P> {
             down_segments: Vec::new(),
             core_segments: Vec::new(),
             max_per_type,
+            up_down_lookup_limit: max_per_type,
+            core_lookup_limit: max_per_type,
         }
     }
 
     /// Create a new path database with default capacity.
     pub fn default() -> Self {
         Self::new(1000)
+    }
+
+    /// Create a new path database with explicit lookup limits.
+    pub fn with_limits(
+        max_per_type: usize,
+        up_down_lookup_limit: usize,
+        core_lookup_limit: usize,
+    ) -> Self {
+        PathDatabase {
+            up_segments: Vec::new(),
+            down_segments: Vec::new(),
+            core_segments: Vec::new(),
+            max_per_type,
+            up_down_lookup_limit,
+            core_lookup_limit,
+        }
+    }
+
+    /// Update storage and lookup limits.
+    pub fn configure_limits(
+        &mut self,
+        max_per_type: usize,
+        up_down_lookup_limit: usize,
+        core_lookup_limit: usize,
+    ) {
+        self.max_per_type = max_per_type;
+        self.up_down_lookup_limit = up_down_lookup_limit;
+        self.core_lookup_limit = core_lookup_limit;
+        self.up_segments.truncate(self.max_per_type);
+        self.down_segments.truncate(self.max_per_type);
+        self.core_segments.truncate(self.max_per_type);
     }
 
     /// Register a path segment.
@@ -212,12 +342,42 @@ impl<P: Prefix> PathDatabase<P> {
     /// * `destination` - The destination ISD-AS (typically a core AS)
     ///
     /// Returns all up-segments that reach the destination.
+    /// The limit is applied per parent/child link (spec-compliant).
+    /// Segments are grouped by parent link identifier (egress interface on parent AS),
+    /// and up to `up_down_lookup_limit` segments are returned per group.
+    /// Segments with UNSPECIFIED interface IDs are grouped by segment ID to distinguish them.
     pub fn lookup_up_segments(&self, destination: &IsdAs) -> Vec<&PathSegment<P>> {
-        self.up_segments
-            .iter()
-            .filter(|seg| seg.destination() == Some(*destination))
-            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
-            .collect()
+        use super::types::InterfaceId;
+        use std::collections::HashMap;
+
+        // Group segments by destination and parent link identifier
+        // Use a tuple of (interface_id, segment_id) as key to handle UNSPECIFIED interfaces
+        let mut grouped: HashMap<(InterfaceId, u64), Vec<&PathSegment<P>>> = HashMap::new();
+
+        for seg in &self.up_segments {
+            if seg.destination() == Some(*destination) {
+                let parent_link = seg.parent_link_id().unwrap_or(InterfaceId::UNSPECIFIED);
+                // For UNSPECIFIED interfaces, use segment ID to distinguish different segments
+                // For specified interfaces, use 0 as segment_id so all segments with same interface are grouped
+                let segment_id_for_key = if parent_link == InterfaceId::UNSPECIFIED {
+                    seg.info.segment_id
+                } else {
+                    0
+                };
+                grouped
+                    .entry((parent_link, segment_id_for_key))
+                    .or_insert_with(Vec::new)
+                    .push(seg);
+            }
+        }
+
+        // Apply limit per parent link group and collect
+        let mut result = Vec::new();
+        for segments in grouped.values() {
+            result.extend(segments.iter().take(self.up_down_lookup_limit));
+        }
+
+        result
     }
 
     /// Lookup up-segments from a specific source.
@@ -230,7 +390,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.up_segments
             .iter()
             .filter(|seg| seg.source() == Some(*source))
-            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
+            .take(self.up_down_lookup_limit)
             .collect()
     }
 
@@ -244,7 +404,7 @@ impl<P: Prefix> PathDatabase<P> {
         self.down_segments
             .iter()
             .filter(|seg| seg.source() == Some(*source))
-            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
+            .take(self.up_down_lookup_limit)
             .collect()
     }
 
@@ -254,12 +414,44 @@ impl<P: Prefix> PathDatabase<P> {
     /// * `destination` - The destination ISD-AS
     ///
     /// Returns all down-segments that reach the destination.
+    /// The limit is applied per parent/child link (spec-compliant).
+    /// Segments are grouped by parent link identifier (ingress interface on parent AS),
+    /// and up to `up_down_lookup_limit` segments are returned per group.
+    /// Segments with UNSPECIFIED interface IDs are grouped by segment ID to distinguish them.
     pub fn lookup_down_segments_to(&self, destination: &IsdAs) -> Vec<&PathSegment<P>> {
-        self.down_segments
-            .iter()
-            .filter(|seg| seg.destination() == Some(*destination))
-            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
-            .collect()
+        use super::types::InterfaceId;
+        use std::collections::HashMap;
+
+        // Group segments by destination and parent link identifier
+        // Use a tuple of (interface_id, segment_id) as key to handle UNSPECIFIED interfaces
+        let mut grouped: HashMap<(InterfaceId, u64), Vec<&PathSegment<P>>> = HashMap::new();
+
+        for seg in &self.down_segments {
+            if seg.destination() == Some(*destination) {
+                let parent_link = seg
+                    .parent_link_id_down()
+                    .unwrap_or(InterfaceId::UNSPECIFIED);
+                // For UNSPECIFIED interfaces, use segment ID to distinguish different segments
+                // For specified interfaces, use 0 as segment_id so all segments with same interface are grouped
+                let segment_id_for_key = if parent_link == InterfaceId::UNSPECIFIED {
+                    seg.info.segment_id
+                } else {
+                    0
+                };
+                grouped
+                    .entry((parent_link, segment_id_for_key))
+                    .or_insert_with(Vec::new)
+                    .push(seg);
+            }
+        }
+
+        // Apply limit per parent link group and collect
+        let mut result = Vec::new();
+        for segments in grouped.values() {
+            result.extend(segments.iter().take(self.up_down_lookup_limit));
+        }
+
+        result
     }
 
     /// Lookup core-segments between two ISDs or ASes.
@@ -289,7 +481,7 @@ impl<P: Prefix> PathDatabase<P> {
                 }
                 true
             })
-            .take(1000)  // Limit to prevent OOM (spec: line 1558 recommends max 50)
+            .take(self.core_lookup_limit)
             .collect()
     }
 
@@ -315,8 +507,7 @@ impl<P: Prefix> PathDatabase<P> {
         let mut removed = 0;
 
         let before = self.up_segments.len();
-        self.up_segments
-            .retain(|seg| seg.expiration > current_time);
+        self.up_segments.retain(|seg| seg.expiration > current_time);
         removed += before - self.up_segments.len();
 
         let before = self.down_segments.len();
@@ -351,6 +542,53 @@ impl<P: Prefix> PathDatabase<P> {
         all_segments.extend(self.down_segments.iter().cloned());
         all_segments.extend(self.core_segments.iter().cloned());
         all_segments
+    }
+}
+
+// IntoIpv4Prefix implementations for prefix conversion
+
+use crate::types::{IntoIpv4Prefix, Ipv4Prefix};
+
+impl<P: Prefix> IntoIpv4Prefix for BeaconStore<P> {
+    type T = BeaconStore<Ipv4Prefix>;
+
+    fn into_ipv4_prefix(self) -> Self::T {
+        BeaconStore {
+            beacons: self
+                .beacons
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().map(|pcb| pcb.into_ipv4_prefix()).collect()))
+                .collect(),
+            max_per_source: self.max_per_source,
+            max_total: self.max_total,
+        }
+    }
+}
+
+impl<P: Prefix> IntoIpv4Prefix for PathDatabase<P> {
+    type T = PathDatabase<Ipv4Prefix>;
+
+    fn into_ipv4_prefix(self) -> Self::T {
+        PathDatabase {
+            up_segments: self
+                .up_segments
+                .into_iter()
+                .map(|seg| seg.into_ipv4_prefix())
+                .collect(),
+            down_segments: self
+                .down_segments
+                .into_iter()
+                .map(|seg| seg.into_ipv4_prefix())
+                .collect(),
+            core_segments: self
+                .core_segments
+                .into_iter()
+                .map(|seg| seg.into_ipv4_prefix())
+                .collect(),
+            max_per_type: self.max_per_type,
+            up_down_lookup_limit: self.up_down_lookup_limit,
+            core_lookup_limit: self.core_lookup_limit,
+        }
     }
 }
 

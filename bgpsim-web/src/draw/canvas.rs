@@ -390,20 +390,18 @@ pub fn CanvasScion() -> Html {
     log::debug!("render CanvasScion");
 
     match layer.as_ref() {
-        Layer::Scion => {
-            scion_links
-                .iter()
-                .map(|(src, dst, link_type)| {
-                    html! {
-                        <ScionLink
-                            src={*src}
-                            dst={*dst}
-                            link_type={*link_type}
-                        />
-                    }
-                })
-                .collect()
-        }
+        Layer::Scion => scion_links
+            .iter()
+            .map(|(src, dst, link_type)| {
+                html! {
+                    <ScionLink
+                        src={*src}
+                        dst={*dst}
+                        link_type={*link_type}
+                    />
+                }
+            })
+            .collect(),
         _ => html!(),
     }
 }

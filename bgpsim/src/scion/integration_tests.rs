@@ -43,18 +43,15 @@ mod tests {
 
         // Core AS 1
         let as1 = IsdAs::new(1, 110u64);
-        let mut cs1: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as1, true);
+        let mut cs1: ScionControlService<SimplePrefix> = ScionControlService::new(as1, true);
 
         // Core AS 2
         let as2 = IsdAs::new(1, 120u64);
-        let mut cs2: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as2, true);
+        let mut cs2: ScionControlService<SimplePrefix> = ScionControlService::new(as2, true);
 
         // Core AS 3
         let as3 = IsdAs::new(1, 130u64);
-        let mut cs3: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as3, true);
+        let mut cs3: ScionControlService<SimplePrefix> = ScionControlService::new(as3, true);
 
         // Setup interfaces
         // AS1 -> AS2
@@ -127,7 +124,7 @@ mod tests {
         let pcb3 = extend_pcb(
             pcb2.clone(),
             as3,
-            InterfaceId(1), // Ingress from AS2
+            InterfaceId(1),           // Ingress from AS2
             InterfaceId::UNSPECIFIED, // No egress (end of path)
             1500,
             timestamp,
@@ -242,8 +239,10 @@ mod tests {
         assert_eq!(selected.len(), 2);
 
         // Verify selected PCBs are the shortest ones
-        let selected_lengths: Vec<usize> =
-            selected.iter().map(|&i| all_beacons[i].path_length()).collect();
+        let selected_lengths: Vec<usize> = selected
+            .iter()
+            .map(|&i| all_beacons[i].path_length())
+            .collect();
         assert!(selected_lengths.contains(&2)); // pcb_short
         assert!(selected_lengths.contains(&3)); // pcb_medium
         assert!(!selected_lengths.contains(&4)); // pcb_long not selected
@@ -354,8 +353,7 @@ mod tests {
     #[test]
     fn test_control_service_complete_workflow() {
         let isd_as = IsdAs::new(1, 110u64);
-        let mut cs: ScionControlService<SimplePrefix> =
-            ScionControlService::new(isd_as, true);
+        let mut cs: ScionControlService<SimplePrefix> = ScionControlService::new(isd_as, true);
 
         assert_eq!(cs.isd_as, isd_as);
         assert!(cs.is_core);
@@ -465,8 +463,7 @@ mod tests {
             1500,
             timestamp,
         );
-        let up_seg: PathSegment<SimplePrefix> =
-            PathSegment::from_pcb(&pcb_up, SegmentType::Up);
+        let up_seg: PathSegment<SimplePrefix> = PathSegment::from_pcb(&pcb_up, SegmentType::Up);
         // up_seg: as_path=[120,110], source=110 (non-core), dest=120 (core)
 
         // Create down-segment from AS2 (core) to AS3
@@ -539,16 +536,11 @@ mod tests {
         let as5 = IsdAs::new(1, 150u64); // Core
 
         // Create control services
-        let _cs1: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as1, false);
-        let mut cs2: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as2, true);
-        let mut cs3: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as3, true);
-        let _cs4: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as4, false);
-        let mut cs5: ScionControlService<SimplePrefix> =
-            ScionControlService::new(as5, true);
+        let _cs1: ScionControlService<SimplePrefix> = ScionControlService::new(as1, false);
+        let mut cs2: ScionControlService<SimplePrefix> = ScionControlService::new(as2, true);
+        let mut cs3: ScionControlService<SimplePrefix> = ScionControlService::new(as3, true);
+        let _cs4: ScionControlService<SimplePrefix> = ScionControlService::new(as4, false);
+        let mut cs5: ScionControlService<SimplePrefix> = ScionControlService::new(as5, true);
 
         // Setup interfaces (simplified - just recording connectivity)
         // AS2 has connections to AS1, AS3, AS5
@@ -646,7 +638,9 @@ mod tests {
         assert!(cs2.path_database.register_segment(core_seg_2to5.clone()));
 
         // Verify lookups work
-        let segs_to_3 = cs3.path_database.lookup_core_segments(Some(&as2), Some(&as3));
+        let segs_to_3 = cs3
+            .path_database
+            .lookup_core_segments(Some(&as2), Some(&as3));
         assert_eq!(segs_to_3.len(), 1);
 
         // === Phase 4: Forwarding Path Construction ===
@@ -682,11 +676,8 @@ mod tests {
         let down_seg_3to4 = temp_up.reverse();
 
         // Construct complete path AS1 -> AS2 -> AS3 -> AS4
-        let complete_path = ForwardingPath::new(
-            Some(up_seg_1to2),
-            Some(core_seg_2to3),
-            Some(down_seg_3to4),
-        );
+        let complete_path =
+            ForwardingPath::new(Some(up_seg_1to2), Some(core_seg_2to3), Some(down_seg_3to4));
 
         assert!(complete_path.is_ok());
         let path = complete_path.unwrap();
@@ -711,4 +702,3 @@ mod tests {
         assert_eq!(cs3.path_database.total_count(), 1);
     }
 }
-

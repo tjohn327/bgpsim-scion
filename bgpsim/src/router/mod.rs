@@ -165,8 +165,20 @@ impl<P: Prefix, Ospf> Router<P, Ospf> {
         isd_as: crate::scion::IsdAs,
         is_core: bool,
     ) -> Option<crate::scion::ScionControlService<P>> {
+        self.enable_scion_with_mode(isd_as, is_core, crate::scion::ScionSimulationMode::Dynamic)
+    }
+
+    /// Enable SCION for this router and explicitly select the simulation mode.
+    pub(crate) fn enable_scion_with_mode(
+        &mut self,
+        isd_as: crate::scion::IsdAs,
+        is_core: bool,
+        mode: crate::scion::ScionSimulationMode,
+    ) -> Option<crate::scion::ScionControlService<P>> {
         self.scion
-            .replace(crate::scion::ScionControlService::new(isd_as, is_core))
+            .replace(crate::scion::ScionControlService::with_mode(
+                isd_as, is_core, mode,
+            ))
     }
 
     /// Disable SCION for this router

@@ -121,7 +121,7 @@ impl<P: Prefix> PathSegment<P> {
         match self.segment_type {
             SegmentType::Up => self.as_path.last().copied(), // Up-segments: forwarding goes from last (non-core) to first (core)
             SegmentType::Core => self.as_path.first().copied(),
-            SegmentType::Down => self.as_path.last().copied(), // Down-segments: forwarding goes from last (core) to first (non-core) in reversed as_path
+            SegmentType::Down => self.as_path.first().copied(), // Down-segments: forwarding goes from first (core) to last (non-core)
         }
     }
 
@@ -130,13 +130,41 @@ impl<P: Prefix> PathSegment<P> {
         match self.segment_type {
             SegmentType::Up => self.as_path.first().copied(), // Up-segments: forwarding goes from last (non-core) to first (core)
             SegmentType::Core => self.as_path.last().copied(),
-            SegmentType::Down => self.as_path.first().copied(), // Down-segments: forwarding goes from last (core) to first (non-core) in reversed as_path
+            SegmentType::Down => self.as_path.last().copied(), // Down-segments: forwarding goes from first (core) to last (non-core)
         }
     }
 
     /// Get the length of the path (number of ASes)
     pub fn length(&self) -> usize {
         self.as_path.len()
+    }
+
+    /// Get the parent link identifier for up-segments.
+    ///
+    /// For up-segments, this returns the egress interface ID of the first hop,
+    /// which identifies which parent link was used (the interface on the parent/core AS).
+    /// Returns None for non-up segments or if the segment has no hop fields.
+    pub fn parent_link_id(&self) -> Option<InterfaceId> {
+        if self.segment_type != SegmentType::Up || self.hop_fields.is_empty() {
+            return None;
+        }
+        // For up-segments in forwarding direction, the first hop's egress interface
+        // is on the parent/core AS and identifies which parent link was used
+        Some(self.hop_fields[0].egress)
+    }
+
+    /// Get the parent link identifier for down-segments.
+    ///
+    /// For down-segments, this returns the ingress interface ID of the first hop,
+    /// which identifies which parent link was used (the interface on the parent/core AS).
+    /// Returns None for non-down segments or if the segment has no hop fields.
+    pub fn parent_link_id_down(&self) -> Option<InterfaceId> {
+        if self.segment_type != SegmentType::Down || self.hop_fields.is_empty() {
+            return None;
+        }
+        // For down-segments in forwarding direction, the first hop's ingress interface
+        // is on the parent/core AS and identifies which parent link was used
+        Some(self.hop_fields[0].ingress)
     }
 
     /// Check if this segment is expired
@@ -204,7 +232,10 @@ impl<P: Prefix> PathSegment<P> {
         }
 
         // Verify all segments are core segments
-        if !segments.iter().all(|s| matches!(s.segment_type, SegmentType::Core)) {
+        if !segments
+            .iter()
+            .all(|s| matches!(s.segment_type, SegmentType::Core))
+        {
             return None;
         }
 
@@ -237,7 +268,11 @@ impl<P: Prefix> PathSegment<P> {
             }
 
             // Adjust peering positions and add
-            let offset = if seg_idx == 0 { 0 } else { combined_as_path.len() - seg.as_path.len() + 1 };
+            let offset = if seg_idx == 0 {
+                0
+            } else {
+                combined_as_path.len() - seg.as_path.len() + 1
+            };
             for peering in &seg.peering_options {
                 combined_peering.push(PeeringShortcut {
                     position: peering.position + offset,
@@ -309,8 +344,10 @@ impl<P: Prefix> PathSegment<P> {
                     // Found a matching AS, now check if other has a peering option back to self
                     for other_peering in &other.peering_options {
                         // Check if the peering is at the correct position and points back
-                        if other_peering.position == other_pos &&
-                           self.as_path.get(peering.position) == Some(&other_peering.peer_isd_as) {
+                        if other_peering.position == other_pos
+                            && self.as_path.get(peering.position)
+                                == Some(&other_peering.peer_isd_as)
+                        {
                             shortcuts.push((peering.position, other_pos, peering));
                         }
                     }
@@ -828,8 +865,8 @@ mod tests {
         let info1 = SegmentInfo::new(1000, 12345);
         let mut pcb1: Pcb<SimplePrefix> = Pcb::new(info1);
 
-        let as1 = IsdAs::new(1, 110u64);  // Non-core
-        let as2 = IsdAs::new(1, 120u64);  // Peer
+        let as1 = IsdAs::new(1, 110u64); // Non-core
+        let as2 = IsdAs::new(1, 120u64); // Peer
         let core = IsdAs::new(1, 200u64); // Core
 
         // PCB1: core -> as1, with peering to as2
@@ -838,10 +875,7 @@ mod tests {
             HopEntry::new(create_test_hop_field(0, 1), 1500),
         ));
 
-        let mut as1_entry = AsEntry::new(
-            as1,
-            HopEntry::new(create_test_hop_field(1, 0), 1500),
-        );
+        let mut as1_entry = AsEntry::new(as1, HopEntry::new(create_test_hop_field(1, 0), 1500));
         // Add peering to as2
         as1_entry.peer_entries.push(PeerEntry {
             peer_isd_as: as2,
@@ -860,10 +894,7 @@ mod tests {
             HopEntry::new(create_test_hop_field(0, 2), 1500),
         ));
 
-        let mut as2_entry = AsEntry::new(
-            as2,
-            HopEntry::new(create_test_hop_field(2, 0), 1500),
-        );
+        let mut as2_entry = AsEntry::new(as2, HopEntry::new(create_test_hop_field(2, 0), 1500));
         // Add peering to as1
         as2_entry.peer_entries.push(PeerEntry {
             peer_isd_as: as1,
@@ -907,10 +938,7 @@ mod tests {
             HopEntry::new(create_test_hop_field(0, 1), 1500),
         ));
 
-        let mut as1_entry = AsEntry::new(
-            as1,
-            HopEntry::new(create_test_hop_field(1, 0), 1500),
-        );
+        let mut as1_entry = AsEntry::new(as1, HopEntry::new(create_test_hop_field(1, 0), 1500));
         as1_entry.peer_entries.push(PeerEntry {
             peer_isd_as: as2,
             peer_interface: InterfaceId(10),
@@ -928,10 +956,7 @@ mod tests {
             HopEntry::new(create_test_hop_field(0, 2), 1500),
         ));
 
-        let mut as2_entry = AsEntry::new(
-            as2,
-            HopEntry::new(create_test_hop_field(2, 0), 1500),
-        );
+        let mut as2_entry = AsEntry::new(as2, HopEntry::new(create_test_hop_field(2, 0), 1500));
         as2_entry.peer_entries.push(PeerEntry {
             peer_isd_as: as1,
             peer_interface: InterfaceId(5),
@@ -948,13 +973,8 @@ mod tests {
         assert!(!shortcuts.is_empty());
 
         let (pos1, pos2, peering) = shortcuts[0];
-        let path = ForwardingPath::new_with_peering(
-            seg1.clone(),
-            seg2.clone(),
-            pos1,
-            pos2,
-            *peering,
-        );
+        let path =
+            ForwardingPath::new_with_peering(seg1.clone(), seg2.clone(), pos1, pos2, *peering);
 
         assert!(path.is_ok(), "Should create peering path");
         let path = path.unwrap();
@@ -986,10 +1006,7 @@ mod tests {
             HopEntry::new(create_test_hop_field(0, 1), 1500),
         ));
 
-        let mut as1_entry = AsEntry::new(
-            as1,
-            HopEntry::new(create_test_hop_field(1, 0), 1500),
-        );
+        let mut as1_entry = AsEntry::new(as1, HopEntry::new(create_test_hop_field(1, 0), 1500));
         // Peering to as3 (not as2)
         as1_entry.peer_entries.push(PeerEntry {
             peer_isd_as: as3,
@@ -1018,6 +1035,9 @@ mod tests {
 
         // Should not find any shortcuts
         let shortcuts = seg1.find_peering_shortcuts(&seg2);
-        assert!(shortcuts.is_empty(), "Should not find shortcuts without matching peering");
+        assert!(
+            shortcuts.is_empty(),
+            "Should not find shortcuts without matching peering"
+        );
     }
 }

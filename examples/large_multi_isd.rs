@@ -41,9 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         leaf_ases_per_isd,
     )?;
 
-    println!("Topology built: {} routers, {} links\n",
-             net.indices().count(),
-             net.ospf_network().edges().count());
+    println!(
+        "Topology built: {} routers, {} links\n",
+        net.indices().count(),
+        net.ospf_network().edges().count()
+    );
 
     // === BGP Evaluation ===
     println!("=== BGP Evaluation ===");
@@ -99,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Intra-ISD beaconing
         let intra_beacon_start = Instant::now();
-        net.scion_intra_isd_beaconing(1000, 50)?;  // Spec-recommended: 50
+        net.scion_intra_isd_beaconing(1000, 50)?; // Spec-recommended: 50
         let intra_beacon_time = intra_beacon_start.elapsed();
 
         // Inter-ISD beaconing
@@ -109,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Registration
         let registration_start = Instant::now();
-        net.scion_registration_round(50)?;  // Spec-recommended: 50
+        net.scion_registration_round(50)?; // Spec-recommended: 50
         let registration_time = registration_start.elapsed();
 
         let scion_total_time = scion_start.elapsed();
@@ -130,8 +132,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("    Median paths: {}", path_stats.median_paths);
         println!("    Max paths: {}", path_stats.max_paths);
         println!("    Min paths: {}", path_stats.min_paths);
-        println!("    AS pairs with >1 path: {:.1}%",
-                 path_stats.multi_path_percentage);
+        println!(
+            "    AS pairs with >1 path: {:.1}%",
+            path_stats.multi_path_percentage
+        );
         println!("    Path lookup time: {:?}", path_diversity_time);
 
         // Measure intra-ISD vs inter-ISD
@@ -146,8 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Setup time:");
         println!("    BGP: {:?}", bgp_total_time);
         println!("    SCION: {:?}", scion_total_time);
-        println!("    Ratio (SCION/BGP): {:.2}x",
-                 scion_total_time.as_secs_f64() / bgp_total_time.as_secs_f64());
+        println!(
+            "    Ratio (SCION/BGP): {:.2}x",
+            scion_total_time.as_secs_f64() / bgp_total_time.as_secs_f64()
+        );
 
         println!("\n  Path Diversity:");
         println!("    BGP: 1.00 paths/destination");
@@ -237,7 +243,7 @@ fn build_multi_isd_topology(
     // Connect core ASes within each ISD
     for isd_data in topology.isds.values() {
         for i in 0..isd_data.core_ases.len() {
-            for j in (i+1)..isd_data.core_ases.len() {
+            for j in (i + 1)..isd_data.core_ases.len() {
                 net.add_link(isd_data.core_ases[i], isd_data.core_ases[j])?;
                 net.set_link_weight(isd_data.core_ases[i], isd_data.core_ases[j], 1.0)?;
             }
@@ -247,7 +253,7 @@ fn build_multi_isd_topology(
     // Connect core ASes across ISDs (partial mesh)
     let isd_numbers: Vec<_> = topology.isds.keys().copied().collect();
     for i in 0..isd_numbers.len() {
-        for j in (i+1)..isd_numbers.len() {
+        for j in (i + 1)..isd_numbers.len() {
             let isd1_cores = &topology.isds[&isd_numbers[i]].core_ases;
             let isd2_cores = &topology.isds[&isd_numbers[j]].core_ases;
 
@@ -313,7 +319,7 @@ fn setup_bgp_sessions(
     // eBGP sessions between core ASes (inter-ISD)
     let isd_numbers: Vec<_> = topology.isds.keys().copied().collect();
     for i in 0..isd_numbers.len() {
-        for j in (i+1)..isd_numbers.len() {
+        for j in (i + 1)..isd_numbers.len() {
             let isd1_cores = &topology.isds[&isd_numbers[i]].core_ases;
             let isd2_cores = &topology.isds[&isd_numbers[j]].core_ases;
 
@@ -324,11 +330,11 @@ fn setup_bgp_sessions(
     // iBGP full mesh within each ISD's core
     for isd_data in topology.isds.values() {
         for i in 0..isd_data.core_ases.len() {
-            for j in (i+1)..isd_data.core_ases.len() {
+            for j in (i + 1)..isd_data.core_ases.len() {
                 net.set_bgp_session(
                     isd_data.core_ases[i],
                     isd_data.core_ases[j],
-                    Some(BgpSessionType::IBgpPeer)
+                    Some(BgpSessionType::IBgpPeer),
                 )?;
             }
         }
@@ -338,7 +344,11 @@ fn setup_bgp_sessions(
     for isd_data in topology.isds.values() {
         for &transit in &isd_data.transit_ases {
             for &core in &isd_data.core_ases {
-                if net.ospf_network().neighbors(transit).any(|e| e.src() == core) {
+                if net
+                    .ospf_network()
+                    .neighbors(transit)
+                    .any(|e| e.src() == core)
+                {
                     net.set_bgp_session(core, transit, Some(BgpSessionType::EBgp))?;
                 }
             }
@@ -349,7 +359,11 @@ fn setup_bgp_sessions(
     for isd_data in topology.isds.values() {
         for &leaf in &isd_data.leaf_ases {
             for &transit in &isd_data.transit_ases {
-                if net.ospf_network().neighbors(leaf).any(|e| e.src() == transit) {
+                if net
+                    .ospf_network()
+                    .neighbors(leaf)
+                    .any(|e| e.src() == transit)
+                {
                     net.set_bgp_session(transit, leaf, Some(BgpSessionType::EBgp))?;
                 }
             }
@@ -392,14 +406,16 @@ fn enable_scion_on_topology(
     for isd_data in topology.isds.values() {
         // Core-to-core within ISD
         for i in 0..isd_data.core_ases.len() {
-            for j in (i+1)..isd_data.core_ases.len() {
-                if net.ospf_network().neighbors(isd_data.core_ases[i])
+            for j in (i + 1)..isd_data.core_ases.len() {
+                if net
+                    .ospf_network()
+                    .neighbors(isd_data.core_ases[i])
                     .any(|e| e.src() == isd_data.core_ases[j])
                 {
                     net.configure_scion_link(
                         isd_data.core_ases[i],
                         isd_data.core_ases[j],
-                        ScionLinkType::Core
+                        ScionLinkType::Core,
                     )?;
                 }
             }
@@ -408,7 +424,11 @@ fn enable_scion_on_topology(
         // Core-to-transit (parent-child)
         for &transit in &isd_data.transit_ases {
             for &core in &isd_data.core_ases {
-                if net.ospf_network().neighbors(transit).any(|e| e.src() == core) {
+                if net
+                    .ospf_network()
+                    .neighbors(transit)
+                    .any(|e| e.src() == core)
+                {
                     net.configure_scion_link(core, transit, ScionLinkType::ParentChild)?;
                 }
             }
@@ -417,7 +437,11 @@ fn enable_scion_on_topology(
         // Transit-to-leaf (parent-child)
         for &leaf in &isd_data.leaf_ases {
             for &transit in &isd_data.transit_ases {
-                if net.ospf_network().neighbors(leaf).any(|e| e.src() == transit) {
+                if net
+                    .ospf_network()
+                    .neighbors(leaf)
+                    .any(|e| e.src() == transit)
+                {
                     net.configure_scion_link(transit, leaf, ScionLinkType::ParentChild)?;
                 }
             }
@@ -425,14 +449,16 @@ fn enable_scion_on_topology(
 
         // Transit-to-transit peering
         for i in 0..isd_data.transit_ases.len() {
-            for j in (i+1)..isd_data.transit_ases.len() {
-                if net.ospf_network().neighbors(isd_data.transit_ases[i])
+            for j in (i + 1)..isd_data.transit_ases.len() {
+                if net
+                    .ospf_network()
+                    .neighbors(isd_data.transit_ases[i])
                     .any(|e| e.src() == isd_data.transit_ases[j])
                 {
                     net.configure_scion_link(
                         isd_data.transit_ases[i],
                         isd_data.transit_ases[j],
-                        ScionLinkType::Peering
+                        ScionLinkType::Peering,
                     )?;
                 }
             }
@@ -442,11 +468,13 @@ fn enable_scion_on_topology(
     // Configure inter-ISD core links
     let isd_numbers: Vec<_> = topology.isds.keys().copied().collect();
     for i in 0..isd_numbers.len() {
-        for j in (i+1)..isd_numbers.len() {
+        for j in (i + 1)..isd_numbers.len() {
             let isd1_cores = &topology.isds[&isd_numbers[i]].core_ases;
             let isd2_cores = &topology.isds[&isd_numbers[j]].core_ases;
 
-            if net.ospf_network().neighbors(isd1_cores[0])
+            if net
+                .ospf_network()
+                .neighbors(isd1_cores[0])
                 .any(|e| e.src() == isd2_cores[0])
             {
                 net.configure_scion_link(isd1_cores[0], isd2_cores[0], ScionLinkType::Core)?;
@@ -464,7 +492,12 @@ fn count_reachable(
 ) -> Result<usize, NetworkError> {
     let mut count = 0;
     for router in net.indices() {
-        if net.get_router(router)?.bgp.get_selected_bgp_route(prefix).is_some() {
+        if net
+            .get_router(router)?
+            .bgp
+            .get_selected_bgp_route(prefix)
+            .is_some()
+        {
             count += 1;
         }
     }
@@ -503,7 +536,7 @@ fn measure_path_diversity(
         // Leaf to leaf within ISD
         let sample_size = isd_data.leaf_ases.len().min(10);
         for i in 0..sample_size {
-            for j in (i+1)..sample_size {
+            for j in (i + 1)..sample_size {
                 let src = isd_data.leaf_ases[i];
                 let dst = isd_data.leaf_ases[j];
 
@@ -519,8 +552,16 @@ fn measure_path_diversity(
     all_path_counts.sort();
     let total: usize = all_path_counts.iter().sum();
     let count = all_path_counts.len();
-    let avg_paths = if count > 0 { total as f64 / count as f64 } else { 0.0 };
-    let median_paths = if count > 0 { all_path_counts[count / 2] } else { 0 };
+    let avg_paths = if count > 0 {
+        total as f64 / count as f64
+    } else {
+        0.0
+    };
+    let median_paths = if count > 0 {
+        all_path_counts[count / 2]
+    } else {
+        0
+    };
     let max_paths = all_path_counts.iter().max().copied().unwrap_or(0);
     let min_paths = all_path_counts.iter().min().copied().unwrap_or(0);
     let multi_path_count = all_path_counts.iter().filter(|&&c| c > 1).count();
@@ -549,11 +590,10 @@ fn measure_intra_isd_paths(
     for isd_data in topology.isds.values() {
         let sample = isd_data.leaf_ases.len().min(5);
         for i in 0..sample {
-            for j in (i+1)..sample {
-                if let Ok(paths) = net.scion_lookup_paths(
-                    isd_data.leaf_ases[i],
-                    isd_data.leaf_ases[j]
-                ) {
+            for j in (i + 1)..sample {
+                if let Ok(paths) =
+                    net.scion_lookup_paths(isd_data.leaf_ases[i], isd_data.leaf_ases[j])
+                {
                     path_counts.push(paths.len());
                 }
             }
@@ -561,7 +601,11 @@ fn measure_intra_isd_paths(
     }
 
     let total: usize = path_counts.iter().sum();
-    Ok(if path_counts.is_empty() { 0.0 } else { total as f64 / path_counts.len() as f64 })
+    Ok(if path_counts.is_empty() {
+        0.0
+    } else {
+        total as f64 / path_counts.len() as f64
+    })
 }
 
 #[cfg(feature = "scion")]
@@ -574,7 +618,7 @@ fn measure_inter_isd_paths(
 
     // Sample inter-ISD paths
     for i in 0..isd_numbers.len().min(3) {
-        for j in (i+1)..isd_numbers.len().min(3) {
+        for j in (i + 1)..isd_numbers.len().min(3) {
             let isd1_leaves = &topology.isds[&isd_numbers[i]].leaf_ases;
             let isd2_leaves = &topology.isds[&isd_numbers[j]].leaf_ases;
 
@@ -584,7 +628,7 @@ fn measure_inter_isd_paths(
                 if let Ok(paths) = net.scion_lookup_inter_isd_paths_limited(
                     isd1_leaves[k],
                     isd2_leaves[k % isd2_leaves.len()],
-                    100 // Limit to 100 core path chains
+                    100, // Limit to 100 core path chains
                 ) {
                     path_counts.push(paths.len());
                 }
@@ -593,7 +637,11 @@ fn measure_inter_isd_paths(
     }
 
     let total: usize = path_counts.iter().sum();
-    Ok(if path_counts.is_empty() { 0.0 } else { total as f64 / path_counts.len() as f64 })
+    Ok(if path_counts.is_empty() {
+        0.0
+    } else {
+        total as f64 / path_counts.len() as f64
+    })
 }
 
 /// Test failure resilience
@@ -613,15 +661,26 @@ fn test_failure_resilience(
     println!("  SCION paths before failure: {}", scion_paths_before.len());
 
     // BGP: Check reachability before failure
-    let bgp_reachable_before = net.get_router(dst)?.bgp.get_selected_bgp_route(prefix).is_some();
+    let bgp_reachable_before = net
+        .get_router(dst)?
+        .bgp
+        .get_selected_bgp_route(prefix)
+        .is_some();
     println!("  BGP reachable before failure: {}", bgp_reachable_before);
 
     // Simulate a link failure (transit to leaf)
     let failed_transit = test_isd.transit_ases[0];
     let failed_leaf = test_isd.leaf_ases[0];
 
-    if net.ospf_network().neighbors(failed_transit).any(|e| e.src() == failed_leaf) {
-        println!("\n  Simulating link failure: {:?} <-> {:?}", failed_transit, failed_leaf);
+    if net
+        .ospf_network()
+        .neighbors(failed_transit)
+        .any(|e| e.src() == failed_leaf)
+    {
+        println!(
+            "\n  Simulating link failure: {:?} <-> {:?}",
+            failed_transit, failed_leaf
+        );
 
         // Fail the link
         net.set_link_weight(failed_transit, failed_leaf, f64::INFINITY)?;
@@ -629,28 +688,47 @@ fn test_failure_resilience(
 
         // SCION: Instant failover (filter out affected paths)
         let scion_instant_start = Instant::now();
-        let scion_paths_after: Vec<_> = scion_paths_before.iter()
+        let scion_paths_after: Vec<_> = scion_paths_before
+            .iter()
             .filter(|p| !path_uses_link(p, failed_transit, failed_leaf))
             .collect();
         let scion_failover_time = scion_instant_start.elapsed();
 
         println!("  SCION instant failover: {:?}", scion_failover_time);
-        println!("  SCION paths after instant failover: {}", scion_paths_after.len());
+        println!(
+            "  SCION paths after instant failover: {}",
+            scion_paths_after.len()
+        );
 
         // BGP: Needs reconvergence
         let bgp_reconv_start = Instant::now();
         net.manual_simulation()?;
         let bgp_reconvergence_time = bgp_reconv_start.elapsed();
 
-        let bgp_reachable_after = net.get_router(dst)?.bgp.get_selected_bgp_route(prefix).is_some();
+        let bgp_reachable_after = net
+            .get_router(dst)?
+            .bgp
+            .get_selected_bgp_route(prefix)
+            .is_some();
         println!("\n  BGP reconvergence: {:?}", bgp_reconvergence_time);
-        println!("  BGP reachable after reconvergence: {}", bgp_reachable_after);
+        println!(
+            "  BGP reachable after reconvergence: {}",
+            bgp_reachable_after
+        );
 
         println!("\n  Recovery time comparison:");
-        println!("    SCION: {:?} (instant path switching)", scion_failover_time);
-        println!("    BGP: {:?} (network reconvergence)", bgp_reconvergence_time);
-        println!("    Speedup: {:.0}x faster",
-                 bgp_reconvergence_time.as_secs_f64() / scion_failover_time.as_secs_f64());
+        println!(
+            "    SCION: {:?} (instant path switching)",
+            scion_failover_time
+        );
+        println!(
+            "    BGP: {:?} (network reconvergence)",
+            bgp_reconvergence_time
+        );
+        println!(
+            "    Speedup: {:.0}x faster",
+            bgp_reconvergence_time.as_secs_f64() / scion_failover_time.as_secs_f64()
+        );
     }
 
     Ok(())
@@ -660,7 +738,7 @@ fn test_failure_resilience(
 fn path_uses_link(
     path: &bgpsim::scion::ForwardingPath<SimplePrefix>,
     r1: RouterId,
-    r2: RouterId
+    r2: RouterId,
 ) -> bool {
     // Check if path uses the failed link
     for i in 0..path.as_path.len().saturating_sub(1) {

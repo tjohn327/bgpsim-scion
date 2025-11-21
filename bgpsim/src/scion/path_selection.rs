@@ -191,8 +191,8 @@ impl<P: Prefix> PathSelectionPolicy<P> for CompositePolicy<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SimplePrefix;
     use crate::scion::types::IsdAs;
+    use crate::types::SimplePrefix;
 
     fn create_test_path(as_count: usize, mtu: u16) -> ForwardingPath<SimplePrefix> {
         // Create a simple path with the specified number of ASes
@@ -318,4 +318,61 @@ mod tests {
         // All have same length, should be in original order
         assert_eq!(selected, vec![0, 1, 2]);
     }
+}
+
+// ============================================================================
+// PCB Quality Comparison for Beaconing (Spec-compliant selection)
+// ============================================================================
+
+use super::pcb::Pcb;
+
+/// Compare two PCBs for quality during beaconing.
+///
+/// Returns true if pcb_a is better than pcb_b.
+/// Used by core ASes to select "at most 5 best PCBs per destination" (§ 6.1.2).
+///
+/// Quality criteria (in order of priority):
+/// 1. Shorter path (fewer AS hops) - preferred for efficiency
+/// 2. Newer timestamp (fresher paths) - reflects current network state
+pub fn is_better_pcb<P: Prefix>(pcb_a: &Pcb<P>, pcb_b: &Pcb<P>) -> bool {
+    let hops_a = pcb_a.get_as_path().len();
+    let hops_b = pcb_b.get_as_path().len();
+
+    if hops_a != hops_b {
+        return hops_a < hops_b; // Prefer shorter paths
+    }
+
+    // If same length, prefer newer paths
+    pcb_a.segment_info.timestamp > pcb_b.segment_info.timestamp
+}
+
+/// Select the best N PCBs from a set.
+///
+/// Sorts by quality (using is_better_pcb) and returns the top N.
+/// This implements spec-compliant PCB selection for beaconing (§ 6.1.2).
+///
+/// # Arguments
+/// * `pcbs` - Available PCBs to choose from
+/// * `max_count` - Maximum number of PCBs to select (typically 5 per spec)
+///
+/// # Returns
+/// Vector of references to the best PCBs, sorted by quality (best first)
+pub fn select_best_pcbs<P: Prefix>(mut pcbs: Vec<&Pcb<P>>, max_count: usize) -> Vec<&Pcb<P>> {
+    if pcbs.is_empty() || max_count == 0 {
+        return Vec::new();
+    }
+
+    // Sort by quality (best first)
+    pcbs.sort_by(|a, b| {
+        if is_better_pcb(a, b) {
+            std::cmp::Ordering::Less
+        } else if is_better_pcb(b, a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+
+    // Return top N
+    pcbs.into_iter().take(max_count).collect()
 }

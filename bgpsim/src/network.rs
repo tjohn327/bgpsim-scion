@@ -105,6 +105,15 @@ pub struct Network<
     pub(crate) stop_after: Option<usize>,
     pub(crate) queue: Q,
     pub(crate) skip_queue: bool,
+    /// SCION Autonomous Systems (AS-level structures supporting multiple border routers)
+    #[serde_as(as = "Vec<(_, _)>")]
+    pub(crate) scion_ases: HashMap<crate::scion::IsdAs, crate::scion::ScionAs<P>>,
+    /// Current SCION simulation mode (dynamic vs static).
+    #[serde(default)]
+    pub(crate) scion_mode: crate::scion::ScionSimulationMode,
+    /// Cached SCION core diameter (in AS entries) for static mode.
+    #[serde(skip)]
+    pub(crate) scion_core_diameter: Option<usize>,
 }
 
 impl<P: Prefix, Q: Clone, Ospf: OspfImpl> Clone for Network<P, Q, Ospf> {
@@ -121,6 +130,9 @@ impl<P: Prefix, Q: Clone, Ospf: OspfImpl> Clone for Network<P, Q, Ospf> {
             stop_after: self.stop_after,
             queue: self.queue.clone(),
             skip_queue: self.skip_queue,
+            scion_ases: self.scion_ases.clone(),
+            scion_mode: self.scion_mode,
+            scion_core_diameter: self.scion_core_diameter,
         }
     }
 }
@@ -143,6 +155,9 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             stop_after: Some(DEFAULT_STOP_AFTER),
             queue,
             skip_queue: false,
+            scion_ases: HashMap::new(),
+            scion_mode: crate::scion::ScionSimulationMode::Dynamic,
+            scion_core_diameter: None,
         }
     }
 
@@ -448,6 +463,283 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             .get_area(source, target)
             .ok_or(NetworkError::LinkNotFound(source, target))
     }
+
+    // ========== SCION AS Management ==========
+
+    /// Create a new SCION AS in the network.
+    ///
+    /// This creates the AS-level structure that can support multiple border routers.
+    ///
+    /// # Arguments
+    /// * `isd_as` - The ISD-AS identifier
+    /// * `is_core` - Whether this is a core AS
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err` if the AS already exists
+    ///
+    /// # Example
+    /// ```ignore
+    /// net.create_scion_as(IsdAs::new(1, 110), true)?;
+    /// ```
+    pub fn create_scion_as(
+        &mut self,
+        isd_as: crate::scion::IsdAs,
+        is_core: bool,
+    ) -> Result<(), NetworkError> {
+        if let Some(existing) = self.scion_ases.get_mut(&isd_as) {
+            existing.set_simulation_mode(self.scion_mode);
+        } else {
+            self.scion_ases.insert(
+                isd_as,
+                crate::scion::ScionAs::new(isd_as, is_core, self.scion_mode),
+            );
+        }
+        self.apply_core_propagation_limit();
+        Ok(())
+    }
+
+    /// Get a reference to a SCION AS by its ISD-AS identifier.
+    ///
+    /// # Arguments
+    /// * `isd_as` - The ISD-AS identifier
+    ///
+    /// # Returns
+    /// `Some(&ScionAs)` if found, `None` otherwise
+    pub fn get_scion_as(&self, isd_as: &crate::scion::IsdAs) -> Option<&crate::scion::ScionAs<P>> {
+        self.scion_ases.get(isd_as)
+    }
+
+    /// Get a mutable reference to a SCION AS by its ISD-AS identifier.
+    ///
+    /// # Arguments
+    /// * `isd_as` - The ISD-AS identifier
+    ///
+    /// # Returns
+    /// `Some(&mut ScionAs)` if found, `None` otherwise
+    pub fn get_scion_as_mut(
+        &mut self,
+        isd_as: &crate::scion::IsdAs,
+    ) -> Option<&mut crate::scion::ScionAs<P>> {
+        self.scion_ases.get_mut(isd_as)
+    }
+
+    /// Add a router to a SCION AS as a border router.
+    ///
+    /// # Arguments
+    /// * `router` - The router ID
+    /// * `isd_as` - The ISD-AS identifier of the AS
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err` if the AS doesn't exist or router is already added
+    ///
+    /// # Example
+    /// ```ignore
+    /// net.create_scion_as(IsdAs::new(1, 110), true)?;
+    /// net.add_router_to_scion_as(br1, IsdAs::new(1, 110))?;
+    /// ```
+    pub fn add_router_to_scion_as(
+        &mut self,
+        router: RouterId,
+        isd_as: crate::scion::IsdAs,
+    ) -> Result<(), NetworkError> {
+        let scion_as = self
+            .scion_ases
+            .get_mut(&isd_as)
+            .ok_or(NetworkError::DeviceNotFound(router))?;
+
+        scion_as.add_border_router(router);
+        Ok(())
+    }
+
+    /// Get the number of SCION ASes in the network.
+    pub fn scion_as_count(&self) -> usize {
+        self.scion_ases.len()
+    }
+
+    /// Return the currently configured SCION simulation mode.
+    pub fn scion_simulation_mode(&self) -> crate::scion::ScionSimulationMode {
+        self.scion_mode
+    }
+
+    /// Update the SCION simulation mode (dynamic vs static).
+    pub fn set_scion_simulation_mode(
+        &mut self,
+        mode: crate::scion::ScionSimulationMode,
+    ) -> Result<(), NetworkError> {
+        if self.scion_mode != mode {
+            self.scion_mode = mode;
+            self.invalidate_core_diameter();
+            self.update_all_scion_modes();
+        }
+        Ok(())
+    }
+
+    fn update_all_scion_modes(&mut self) {
+        for router in self.routers.values_mut() {
+            if let Some(cs) = router.scion_mut() {
+                cs.set_simulation_mode(self.scion_mode);
+            }
+        }
+
+        for as_entry in self.scion_ases.values_mut() {
+            as_entry.set_simulation_mode(self.scion_mode);
+        }
+
+        self.apply_core_propagation_limit();
+    }
+
+    pub(crate) fn apply_core_propagation_limit(&mut self) {
+        let limit = if self.scion_mode == crate::scion::ScionSimulationMode::Static {
+            Some(self.ensure_core_diameter())
+        } else {
+            None
+        };
+
+        for router in self.routers.values_mut() {
+            if let Some(cs) = router.scion_mut() {
+                cs.set_core_propagation_limit(limit);
+            }
+        }
+
+        for as_entry in self.scion_ases.values_mut() {
+            as_entry
+                .control_service_mut()
+                .set_core_propagation_limit(limit);
+        }
+    }
+
+    pub(crate) fn invalidate_core_diameter(&mut self) {
+        self.scion_core_diameter = None;
+    }
+
+    fn ensure_core_diameter(&mut self) -> usize {
+        if self.scion_core_diameter.is_none() {
+            let diameter = self.compute_core_diameter_entries();
+            self.scion_core_diameter = Some(diameter);
+        }
+        self.scion_core_diameter.unwrap_or(1)
+    }
+
+    fn compute_core_diameter_entries(&self) -> usize {
+        use std::collections::{HashSet, VecDeque};
+
+        let cores: Vec<_> = self
+            .scion_ases
+            .iter()
+            .filter(|(_, as_entry)| as_entry.is_core)
+            .map(|(isd_as, _)| *isd_as)
+            .collect();
+
+        if cores.len() <= 1 {
+            return 1;
+        }
+
+        let mut max_edges = 0usize;
+        for start in &cores {
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            visited.insert(*start);
+            queue.push_back((*start, 0usize));
+
+            while let Some((node, dist)) = queue.pop_front() {
+                if dist > max_edges {
+                    max_edges = dist;
+                }
+
+                if let Some(as_entry) = self.scion_ases.get(&node) {
+                    for neighbor in as_entry.core_neighbors() {
+                        let is_core = self
+                            .scion_ases
+                            .get(&neighbor)
+                            .map(|info| info.is_core)
+                            .unwrap_or(false);
+                        if !is_core {
+                            continue;
+                        }
+
+                        if visited.insert(neighbor) {
+                            queue.push_back((neighbor, dist + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert edge distance (hops) into number of AS entries in PCB path.
+        max_edges + 1
+    }
+
+    /// Configure a SCION link between two border routers using AS-level management.
+    ///
+    /// This method supports the multi-router AS architecture by managing interfaces
+    /// at the AS level and tracking which border router owns each interface.
+    ///
+    /// # Arguments
+    /// * `router_a` - First border router
+    /// * `isd_as_a` - ISD-AS of first router
+    /// * `router_b` - Second border router
+    /// * `isd_as_b` - ISD-AS of second router
+    /// * `link_type` - Type of SCION link (Core, ParentChild, or Peering)
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, error if ASes don't exist or routers aren't border routers
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Configure link between border routers in different ASes
+    /// net.configure_scion_link_as_level(
+    ///     br1, IsdAs::new(1, 110),
+    ///     br2, IsdAs::new(1, 111),
+    ///     ScionLinkType::ParentChild
+    /// )?;
+    /// ```
+    pub fn configure_scion_link_as_level(
+        &mut self,
+        router_a: RouterId,
+        isd_as_a: crate::scion::IsdAs,
+        router_b: RouterId,
+        isd_as_b: crate::scion::IsdAs,
+        link_type: crate::scion::ScionLinkType,
+    ) -> Result<(), NetworkError> {
+        // Get interface IDs from each AS
+        let if_a = {
+            let as_a = self
+                .scion_ases
+                .get_mut(&isd_as_a)
+                .ok_or(NetworkError::DeviceNotFound(router_a))?;
+            as_a.next_interface_id()
+        };
+
+        let if_b = {
+            let as_b = self
+                .scion_ases
+                .get_mut(&isd_as_b)
+                .ok_or(NetworkError::DeviceNotFound(router_b))?;
+            as_b.next_interface_id()
+        };
+
+        // Create interface info for both sides
+        let info_a = crate::scion::InterfaceInfo::new(if_a, isd_as_b, link_type, router_b, 1500);
+        let info_b = crate::scion::InterfaceInfo::new(if_b, isd_as_a, link_type, router_a, 1500);
+
+        // Add interfaces to ASes and assign to border routers
+        {
+            let as_a = self.scion_ases.get_mut(&isd_as_a).unwrap();
+            as_a.add_interface_for_router(info_a, router_a)
+                .map_err(|_| NetworkError::DeviceNotFound(router_a))?;
+        }
+
+        {
+            let as_b = self.scion_ases.get_mut(&isd_as_b).unwrap();
+            as_b.add_interface_for_router(info_b, router_b)
+                .map_err(|_| NetworkError::DeviceNotFound(router_b))?;
+        }
+
+        self.invalidate_core_diameter();
+        self.apply_core_propagation_limit();
+
+        Ok(())
+    }
 }
 
 impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
@@ -468,6 +760,9 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
             stop_after: self.stop_after,
             queue,
             skip_queue: self.skip_queue,
+            scion_ases: self.scion_ases,
+            scion_mode: self.scion_mode,
+            scion_core_diameter: self.scion_core_diameter,
         }
     }
 
@@ -1113,6 +1408,13 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 .collect(),
             stop_after: self.stop_after,
             skip_queue: self.skip_queue,
+            scion_ases: self
+                .scion_ases
+                .into_iter()
+                .map(|(k, v)| (k, v.into_ipv4_prefix()))
+                .collect(),
+            scion_mode: self.scion_mode,
+            scion_core_diameter: self.scion_core_diameter,
         })
     }
 }

@@ -4,11 +4,11 @@
 //
 // Find optimal max_pcbs value for good path diversity vs performance tradeoff
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, IsdNumber, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 use std::time::Instant;
 
 fn main() -> Result<(), NetworkError> {
@@ -32,8 +32,10 @@ fn analyze_path_diversity(size: usize) -> Result<(), NetworkError> {
     // Test different max_pcbs values
     let max_pcbs_values = vec![5, 10, 20, 50, 100];
 
-    println!("\n{:<10} {:<15} {:<15} {:<15} {:<15}",
-             "max_pcbs", "Beacon Time", "Reg Time", "Avg Paths", "Max Paths");
+    println!(
+        "\n{:<10} {:<15} {:<15} {:<15} {:<15}",
+        "max_pcbs", "Beacon Time", "Reg Time", "Avg Paths", "Max Paths"
+    );
     println!("{}", "-".repeat(70));
 
     for &max_pcbs in &max_pcbs_values {
@@ -49,7 +51,13 @@ fn analyze_path_diversity(size: usize) -> Result<(), NetworkError> {
 
         // Multiple rounds of intra-ISD beaconing to propagate through hierarchy
         // (depth of hierarchy depends on topology size)
-        let rounds = if size >= 10000 { 10 } else if size >= 1000 { 5 } else { 3 };
+        let rounds = if size >= 10000 {
+            10
+        } else if size >= 1000 {
+            5
+        } else {
+            3
+        };
         for _ in 0..rounds {
             net.scion_intra_isd_beaconing(1000, max_pcbs)?;
         }
@@ -67,7 +75,7 @@ fn analyze_path_diversity(size: usize) -> Result<(), NetworkError> {
         let mut path_counts = Vec::new();
 
         for i in 0..sample_size {
-            for j in (i+1)..sample_size {
+            for j in (i + 1)..sample_size {
                 if let Ok(paths) = net.scion_lookup_paths(routers[i], routers[j]) {
                     path_counts.push(paths.len());
                 }
@@ -82,12 +90,14 @@ fn analyze_path_diversity(size: usize) -> Result<(), NetworkError> {
 
         let max_paths = path_counts.iter().max().copied().unwrap_or(0);
 
-        println!("{:<10} {:<15.3} {:<15.3} {:<15.1} {:<15}",
-                 max_pcbs,
-                 beacon_time.as_secs_f64(),
-                 reg_time.as_secs_f64(),
-                 avg_paths,
-                 max_paths);
+        println!(
+            "{:<10} {:<15.3} {:<15.3} {:<15.1} {:<15}",
+            max_pcbs,
+            beacon_time.as_secs_f64(),
+            reg_time.as_secs_f64(),
+            avg_paths,
+            max_paths
+        );
 
         // Show segment counts
         if max_pcbs == 5 || max_pcbs == 100 {
@@ -142,7 +152,7 @@ fn create_topology(
         // Connect within ISD
         // Core mesh
         for i in 0..cores.len() {
-            for j in (i+1)..cores.len() {
+            for j in (i + 1)..cores.len() {
                 net.add_link(cores[i], cores[j])?;
             }
         }
@@ -208,7 +218,9 @@ fn enable_scion(
         };
         let r_is_core = net.get_router(router).unwrap().scion().unwrap().is_core;
 
-        let neighbors: Vec<_> = net.ospf_network().neighbors(router)
+        let neighbors: Vec<_> = net
+            .ospf_network()
+            .neighbors(router)
             .map(|e| e.src())
             .collect();
 

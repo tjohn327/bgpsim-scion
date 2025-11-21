@@ -8,11 +8,11 @@
 // - 2 Leaf ASes per ISD
 // - Inter-ISD path lookup
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 
 fn main() -> Result<(), NetworkError> {
     // Create network
@@ -28,7 +28,7 @@ fn main() -> Result<(), NetworkError> {
 
     // Core AS
     let isd1_core = net.add_router("ISD1-Core", 110);
-    net.enable_scion(isd1_core, IsdAs::new(1, 110u64), true)?;  // is_core=true
+    net.enable_scion(isd1_core, IsdAs::new(1, 110u64), true)?; // is_core=true
 
     // Leaf ASes
     let isd1_leaf1 = net.add_router("ISD1-Leaf1", 111);
@@ -109,7 +109,10 @@ fn main() -> Result<(), NetworkError> {
 
     println!("\n=== Registering Segments ===");
     let (up, down, core) = net.scion_registration_round(50)?;
-    println!("Registered: {} up, {} down, {} core segments\n", up, down, core);
+    println!(
+        "Registered: {} up, {} down, {} core segments\n",
+        up, down, core
+    );
 
     // ==========================================
     // Path Lookup Examples
@@ -142,22 +145,40 @@ fn main() -> Result<(), NetworkError> {
     if !segments.up_segments.is_empty() {
         println!("\n   Example up-segment:");
         let seg = &segments.up_segments[0];
-        println!("     {} hops: {:?}", seg.as_path.len(),
-                 seg.as_path.iter().map(|h| format!("{}-{}", h.isd, h.asn)).collect::<Vec<_>>());
+        println!(
+            "     {} hops: {:?}",
+            seg.as_path.len(),
+            seg.as_path
+                .iter()
+                .map(|h| format!("{}-{}", h.isd, h.asn))
+                .collect::<Vec<_>>()
+        );
     }
 
     if !segments.core_segments.is_empty() {
         println!("\n   Example core-segment:");
         let seg = &segments.core_segments[0];
-        println!("     {} hops: {:?}", seg.as_path.len(),
-                 seg.as_path.iter().map(|h| format!("{}-{}", h.isd, h.asn)).collect::<Vec<_>>());
+        println!(
+            "     {} hops: {:?}",
+            seg.as_path.len(),
+            seg.as_path
+                .iter()
+                .map(|h| format!("{}-{}", h.isd, h.asn))
+                .collect::<Vec<_>>()
+        );
     }
 
     if !segments.down_segments.is_empty() {
         println!("\n   Example down-segment:");
         let seg = &segments.down_segments[0];
-        println!("     {} hops: {:?}", seg.as_path.len(),
-                 seg.as_path.iter().map(|h| format!("{}-{}", h.isd, h.asn)).collect::<Vec<_>>());
+        println!(
+            "     {} hops: {:?}",
+            seg.as_path.len(),
+            seg.as_path
+                .iter()
+                .map(|h| format!("{}-{}", h.isd, h.asn))
+                .collect::<Vec<_>>()
+        );
     }
 
     println!("\n=== Complete ===");

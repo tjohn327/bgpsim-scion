@@ -86,7 +86,10 @@ impl<P: Prefix> Pcb<P> {
 
         // Check if any hop is expired
         for entry in &self.as_entries {
-            if entry.hop_entry.is_expired(self.segment_info.timestamp, current_time, tolerance) {
+            if entry
+                .hop_entry
+                .is_expired(self.segment_info.timestamp, current_time, tolerance)
+            {
                 return true;
             }
         }
@@ -174,10 +177,16 @@ impl std::fmt::Display for PcbValidationError {
             PcbValidationError::Loop => write!(f, "PCB contains a loop"),
             PcbValidationError::Expired => write!(f, "PCB has expired"),
             PcbValidationError::InvalidHopField => write!(f, "Invalid hop field"),
-            PcbValidationError::ContinuityFailure(msg) => write!(f, "Continuity check failed: {}", msg),
-            PcbValidationError::IncomingInterfaceMismatch(msg) => write!(f, "Incoming interface mismatch: {}", msg),
+            PcbValidationError::ContinuityFailure(msg) => {
+                write!(f, "Continuity check failed: {}", msg)
+            }
+            PcbValidationError::IncomingInterfaceMismatch(msg) => {
+                write!(f, "Incoming interface mismatch: {}", msg)
+            }
             PcbValidationError::InvalidLinkType(msg) => write!(f, "Invalid link type: {}", msg),
-            PcbValidationError::NonCoreInCoreBeaconing => write!(f, "Non-core AS in core beaconing"),
+            PcbValidationError::NonCoreInCoreBeaconing => {
+                write!(f, "Non-core AS in core beaconing")
+            }
             PcbValidationError::EmptyPcb => write!(f, "Empty PCB"),
         }
     }

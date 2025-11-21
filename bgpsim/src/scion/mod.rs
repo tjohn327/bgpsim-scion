@@ -65,6 +65,9 @@
 //! - Path validation (valley-free property, loop detection)
 //! - Integration with existing bgpsim event system
 
+use serde::{Deserialize, Serialize};
+
+pub mod as_structure;
 pub mod beaconing;
 pub mod event;
 pub mod path_segment;
@@ -78,6 +81,7 @@ pub mod types;
 mod integration_tests;
 
 // Re-export commonly used types
+pub use as_structure::ScionAs;
 pub use beaconing::{
     add_peering_entries, create_initial_pcb, extend_pcb, select_for_propagation, validate_pcb,
     SelectionPolicy, SimpleSelectionPolicy,
@@ -91,12 +95,82 @@ pub use path_selection::{
     AllPathsPolicy, FirstNPolicy, HighestMtuPolicy, PathSelectionPolicy, ShortestPathPolicy,
 };
 pub use pcb::{
-    AsEntry, HopEntry, HopField, Pcb, PcbExtensions, PcbValidationError, PeerEntry, SegmentInfo,
-    SegmentFlags,
+    AsEntry, HopEntry, HopField, Pcb, PcbExtensions, PcbValidationError, PeerEntry, SegmentFlags,
+    SegmentInfo,
 };
 pub use process::ScionControlService;
+pub use simulation_mode::ScionSimulationMode;
 pub use state::{BeaconStore, PathDatabase};
 pub use types::{InterfaceId, InterfaceInfo, IsdAs, IsdNumber, ScionAsn, ScionLinkType};
+
+mod simulation_mode {
+    use super::*;
+
+    /// Controls how the SCION control-plane simulation behaves.
+    ///
+    /// * [`ScionSimulationMode::Dynamic`] (default) follows the specification's recommended
+    ///   parameters.
+    /// * [`ScionSimulationMode::Static`] is optimized for deterministic topologies where links
+    ///   and segments do not expire and a single beacon wave per ISD is sufficient.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+    pub enum ScionSimulationMode {
+        /// Specification-faithful behaviour (periodic beaconing, larger best sets).
+        #[default]
+        Dynamic,
+        /// Reduced, single-wave style beaconing suitable for large static simulations.
+        Static,
+    }
+
+    impl ScionSimulationMode {
+        /// Maximum number of intra-ISD PCBs per parent/child link.
+        pub(crate) const fn intra_segment_limit(self) -> usize {
+            match self {
+                ScionSimulationMode::Dynamic => 50,
+                ScionSimulationMode::Static => usize::MAX,
+            }
+        }
+
+        /// Maximum number of PCBs forwarded per core destination.
+        pub(crate) const fn core_segment_limit(self) -> usize {
+            match self {
+                ScionSimulationMode::Dynamic => 5,
+                ScionSimulationMode::Static => usize::MAX,
+            }
+        }
+
+        /// Maximum number of up/down segments kept in the path database.
+        pub(crate) const fn path_database_capacity(self) -> usize {
+            match self {
+                ScionSimulationMode::Dynamic => 1_000,
+                ScionSimulationMode::Static => usize::MAX,
+            }
+        }
+
+        /// How many up/down segments to consider when building end-to-end paths.
+        pub const fn up_down_segment_limit(self) -> usize {
+            match self {
+                ScionSimulationMode::Dynamic => 50,
+                ScionSimulationMode::Static => usize::MAX,
+            }
+        }
+
+        /// Maximum number of candidate forwarding paths returned to a caller.
+        pub(crate) const fn max_path_results(self) -> usize {
+            match self {
+                ScionSimulationMode::Dynamic => 1_000,
+                ScionSimulationMode::Static => usize::MAX,
+            }
+        }
+
+        /// Default BeaconStore limits (max entries per source, total entries).
+        pub(crate) const fn beacon_limits(self) -> (usize, usize) {
+            match self {
+                ScionSimulationMode::Dynamic => (50, 5_000),
+                ScionSimulationMode::Static => (50, usize::MAX),
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

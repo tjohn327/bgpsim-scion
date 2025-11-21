@@ -4,16 +4,17 @@
 //
 // Simplest possible multi-ISD setup to debug beaconing
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, IsdNumber, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 
 fn main() -> Result<(), NetworkError> {
     println!("=== Debug: Minimal Multi-ISD Setup ===\n");
 
-    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> = Network::default();
+    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> =
+        Network::default();
 
     // ISD 1: Core1 -> Leaf1
     let core1 = net.add_router("Core1", ASN(110));
@@ -32,7 +33,7 @@ fn main() -> Result<(), NetworkError> {
     // Add links BEFORE enabling SCION
     net.add_link(core1, leaf1)?;
     net.add_link(core2, leaf2)?;
-    net.add_link(core1, core2)?;  // Inter-ISD core link
+    net.add_link(core1, core2)?; // Inter-ISD core link
     println!("\nAdded 3 links");
 
     // Enable SCION
@@ -52,8 +53,12 @@ fn main() -> Result<(), NetworkError> {
     for router in [core1, leaf1, core2, leaf2] {
         let r = net.get_router(router)?;
         if let Some(scion) = r.scion() {
-            println!("{}: ISD-AS {}, is_core={}",
-                r.name(), scion.isd_as, scion.is_core);
+            println!(
+                "{}: ISD-AS {}, is_core={}",
+                r.name(),
+                scion.isd_as,
+                scion.is_core
+            );
         }
     }
 
@@ -75,14 +80,17 @@ fn main() -> Result<(), NetworkError> {
     // Registration
     println!("\n=== Registration ===");
     let (up, down, core) = net.scion_registration_round(50)?;
-    println!("Registered: {} up, {} down, {} core segments", up, down, core);
+    println!(
+        "Registered: {} up, {} down, {} core segments",
+        up, down, core
+    );
 
     // Path lookup
     println!("\n=== Path Lookup ===");
     let paths = net.scion_lookup_paths(leaf1, leaf2)?;
     println!("Leaf1 -> Leaf2: {} paths found", paths.len());
     for (i, path) in paths.iter().enumerate() {
-        println!("  Path {}: {:?}", i+1, path.as_path);
+        println!("  Path {}: {:?}", i + 1, path.as_path);
     }
 
     if paths.is_empty() {

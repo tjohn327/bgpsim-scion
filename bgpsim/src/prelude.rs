@@ -30,7 +30,9 @@ pub use crate::types::{
 pub use bgpsim_macros::*;
 
 #[cfg(feature = "scion")]
+pub use crate::scion::ScionSimulationMode;
+#[cfg(feature = "scion")]
 pub use crate::scion_network::{
-    DEFAULT_CORE_INTERVAL, DEFAULT_HOP_EXPIRATION, DEFAULT_INTRA_ISD_INTERVAL, DEFAULT_MAX_CORE_PCBS,
-    DEFAULT_MAX_PCBS,
+    DEFAULT_CORE_INTERVAL, DEFAULT_HOP_EXPIRATION, DEFAULT_INTRA_ISD_INTERVAL,
+    DEFAULT_MAX_CORE_PCBS, DEFAULT_MAX_PCBS,
 };

@@ -9,11 +9,11 @@
 // and validates that PCB propagation, path segment construction, and path
 // combination work according to the spec.
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::{SimplePrefix, ASN};
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, IsdNumber, ScionLinkType};
+use bgpsim::types::{SimplePrefix, ASN};
 
 fn main() -> Result<(), NetworkError> {
     println!("╔════════════════════════════════════════════════════════════╗");
@@ -84,7 +84,10 @@ fn test_single_isd_compliance() -> Result<(), NetworkError> {
     // Registration: Convert PCBs to path segments
     println!("3. Path segment registration...");
     let (up, down, core) = net.scion_registration_round(10)?;
-    println!("   ✓ Path segments registered: {} up, {} down, {} core", up, down, core);
+    println!(
+        "   ✓ Path segments registered: {} up, {} down, {} core",
+        up, down, core
+    );
     println!();
 
     // Validate PCB propagation compliance
@@ -141,17 +144,29 @@ fn test_multi_isd_compliance() -> Result<(), NetworkError> {
     println!("2. Intra-ISD beaconing (top-down, all ISDs)...");
     // Per spec: "at most 50 PCBs per child link are propagated"
     let intra_pcbs = net.scion_intra_isd_beaconing(time, DEFAULT_MAX_PCBS)?;
-    println!("   ✓ {} PCBs propagated (including foreign ISD PCBs)", intra_pcbs);
+    println!(
+        "   ✓ {} PCBs propagated (including foreign ISD PCBs)",
+        intra_pcbs
+    );
     assert!(intra_pcbs > 0, "Intra-ISD beaconing should propagate PCBs");
 
     // Registration with spec-recommended parameters
     println!("3. Path segment registration...");
     let (up, down, core) = net.scion_registration_round(DEFAULT_MAX_PCBS)?;
-    println!("   ✓ Registered: {} up, {} down, {} core segments", up, down, core);
+    println!(
+        "   ✓ Registered: {} up, {} down, {} core segments",
+        up, down, core
+    );
 
     // Critical: This was broken before the fix!
-    assert!(up > 0, "CRITICAL: Should register up-segments (was 0 before fix)");
-    assert!(down > 0, "CRITICAL: Should register down-segments (was 0 before fix)");
+    assert!(
+        up > 0,
+        "CRITICAL: Should register up-segments (was 0 before fix)"
+    );
+    assert!(
+        down > 0,
+        "CRITICAL: Should register down-segments (was 0 before fix)"
+    );
     println!();
 
     // Validate multi-ISD specific behavior
@@ -188,7 +203,8 @@ fn test_multi_isd_compliance() -> Result<(), NetworkError> {
 ///                    |     if3     |
 ///                    +-------------+
 /// ```
-fn build_spec_topology() -> Result<Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>, NetworkError> {
+fn build_spec_topology(
+) -> Result<Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>, NetworkError> {
     let mut net = Network::default();
 
     // Create ASes as per spec
@@ -197,16 +213,16 @@ fn build_spec_topology() -> Result<Network<SimplePrefix, BasicEventQueue<SimpleP
     let isd = IsdNumber(1);
 
     println!("Creating routers...");
-    let x = net.add_router("X", ASN(110));  // Core AS
+    let x = net.add_router("X", ASN(110)); // Core AS
     let y = net.add_router("Y", ASN(111));
     let z = net.add_router("Z", ASN(114));
-    let v = net.add_router("V", ASN(112));  // Peer
-    let w = net.add_router("W", ASN(113));  // Peer
+    let v = net.add_router("V", ASN(112)); // Peer
+    let w = net.add_router("W", ASN(113)); // Peer
     println!("  Created 5 routers");
 
     // Enable SCION on all routers
     println!("Enabling SCION...");
-    net.enable_scion(x, IsdAs::new(isd, 110u64), true)?;  // Core AS
+    net.enable_scion(x, IsdAs::new(isd, 110u64), true)?; // Core AS
     net.enable_scion(y, IsdAs::new(isd, 111u64), false)?;
     net.enable_scion(z, IsdAs::new(isd, 114u64), false)?;
     net.enable_scion(v, IsdAs::new(isd, 112u64), false)?;
@@ -253,7 +269,9 @@ fn build_spec_topology() -> Result<Network<SimplePrefix, BasicEventQueue<SimpleP
 }
 
 /// Validate that PCB propagation matches spec behavior
-fn validate_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_pcb_propagation(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating PCB Propagation ===");
 
     // According to spec:
@@ -265,7 +283,9 @@ fn validate_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePr
     let z = net.get_router_id("Z")?;
 
     // Check that AS Y received PCBs from X
-    let y_scion = net.get_router(y)?.scion()
+    let y_scion = net
+        .get_router(y)?
+        .scion()
         .expect("AS Y should have SCION enabled");
     let y_pcbs = y_scion.beacon_store.get_all();
 
@@ -274,17 +294,24 @@ fn validate_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePr
 
     // Verify PCBs have AS entries
     for pcb in y_pcbs {
-        assert!(!pcb.as_entries.is_empty(),
-            "PCBs at Y should have AS entries from X");
+        assert!(
+            !pcb.as_entries.is_empty(),
+            "PCBs at Y should have AS entries from X"
+        );
         println!("  - PCB with {} AS entries (from X)", pcb.as_entries.len());
     }
 
     // Check that AS Z received PCBs from Y (with accumulated path info)
-    let z_scion = net.get_router(z)?.scion()
+    let z_scion = net
+        .get_router(z)?
+        .scion()
         .expect("AS Z should have SCION enabled");
     let z_pcbs = z_scion.beacon_store.get_all();
 
-    println!("✓ AS Z received {} PCBs with accumulated path info", z_pcbs.len());
+    println!(
+        "✓ AS Z received {} PCBs with accumulated path info",
+        z_pcbs.len()
+    );
     assert!(!z_pcbs.is_empty(), "AS Z should have received PCBs");
 
     // Verify PCBs at Z have multiple AS entries (X → Y → Z)
@@ -295,8 +322,10 @@ fn validate_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePr
         if num_entries >= 2 {
             found_multi_hop = true;
         }
-        assert!(!pcb.as_entries.is_empty(),
-            "PCBs at Z should have AS entries");
+        assert!(
+            !pcb.as_entries.is_empty(),
+            "PCBs at Z should have AS entries"
+        );
     }
 
     println!("✓ PCBs correctly accumulate AS entries along path");
@@ -306,20 +335,28 @@ fn validate_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePr
 }
 
 /// Validate path segment structure matches spec
-fn validate_path_segments(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_path_segments(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Path Segment Structure ===");
 
     let x_id = net.get_router_id("X")?;
     let y_id = net.get_router_id("Y")?;
     let z_id = net.get_router_id("Z")?;
 
-    let x_isda = net.get_router(x_id)?.scion()
+    let x_isda = net
+        .get_router(x_id)?
+        .scion()
         .expect("AS X should have SCION enabled")
         .isd_as;
-    let y_isda = net.get_router(y_id)?.scion()
+    let y_isda = net
+        .get_router(y_id)?
+        .scion()
         .expect("AS Y should have SCION enabled")
         .isd_as;
-    let z_isda = net.get_router(z_id)?.scion()
+    let z_isda = net
+        .get_router(z_id)?
+        .scion()
         .expect("AS Z should have SCION enabled")
         .isd_as;
 
@@ -334,7 +371,10 @@ fn validate_path_segments(net: &Network<SimplePrefix, BasicEventQueue<SimplePref
     let z_up_segments = z_scion.path_database.get_all_up_segments();
 
     println!("✓ AS Z has {} up segments registered", z_up_segments.len());
-    assert!(!z_up_segments.is_empty(), "AS Z should have up segments to core");
+    assert!(
+        !z_up_segments.is_empty(),
+        "AS Z should have up segments to core"
+    );
 
     for segment in z_up_segments {
         // Up segments: as_path is in beaconing order (core → non-core)
@@ -380,7 +420,9 @@ fn validate_path_segments(net: &Network<SimplePrefix, BasicEventQueue<SimplePref
 }
 
 /// Validate path combination works correctly
-fn validate_path_combination(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_path_combination(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Path Combination ===");
 
     let y_id = net.get_router_id("Y")?;
@@ -399,8 +441,12 @@ fn validate_path_combination(net: &Network<SimplePrefix, BasicEventQueue<SimpleP
         println!("ℹ No combined paths found (Y is likely on Z's up path to core)");
 
         // Verify Z can reach Y via direct parent-child relationship
-        let z_up_paths = net.get_router(z_id)?.scion().unwrap()
-            .path_database.get_all_up_segments();
+        let z_up_paths = net
+            .get_router(z_id)?
+            .scion()
+            .unwrap()
+            .path_database
+            .get_all_up_segments();
 
         let mut found_y_in_up = false;
         let y_isda = net.get_router(y_id)?.scion().unwrap().isd_as;
@@ -421,7 +467,9 @@ fn validate_path_combination(net: &Network<SimplePrefix, BasicEventQueue<SimpleP
         for (i, path) in paths.iter().enumerate() {
             print!("  Path {}: ", i + 1);
             for (j, isd_as) in path.as_path.iter().enumerate() {
-                if j > 0 { print!(" → "); }
+                if j > 0 {
+                    print!(" → ");
+                }
                 print!("{}", isd_as);
             }
             println!(" ({} hops)", path.as_path.len());
@@ -435,8 +483,12 @@ fn validate_path_combination(net: &Network<SimplePrefix, BasicEventQueue<SimpleP
     if paths_yz.is_empty() {
         // Y can reach Z via down segment
         println!("ℹ No combined paths found (Z is Y's child)");
-        let y_down = net.get_router(y_id)?.scion().unwrap()
-            .path_database.get_all_down_segments();
+        let y_down = net
+            .get_router(y_id)?
+            .scion()
+            .unwrap()
+            .path_database
+            .get_all_down_segments();
         assert!(!y_down.is_empty() || true, "Y should have path to reach Z");
     } else {
         println!("✓ Found {} paths from Y to Z", paths_yz.len());
@@ -449,7 +501,9 @@ fn validate_path_combination(net: &Network<SimplePrefix, BasicEventQueue<SimpleP
 }
 
 /// Validate valley-free property
-fn validate_valley_free(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_valley_free(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Valley-Free Property ===");
 
     // According to spec (line 115):
@@ -467,13 +521,19 @@ fn validate_valley_free(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix
     let z_scion = net.get_router(z_id)?.scion().unwrap();
     let up_segments = z_scion.path_database.get_all_up_segments();
 
-    println!("Checking {} up segments for valley-free property...", up_segments.len());
+    println!(
+        "Checking {} up segments for valley-free property...",
+        up_segments.len()
+    );
 
     for segment in up_segments {
         // Up segments should only go "up" toward core
         // In our implementation, this is enforced by construction
         let hops = segment.as_path.len();
-        println!("  ✓ Up segment with {} hops (enforced by construction)", hops);
+        println!(
+            "  ✓ Up segment with {} hops (enforced by construction)",
+            hops
+        );
     }
 
     println!("✓ Valley-free property maintained");
@@ -493,7 +553,8 @@ fn validate_valley_free(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix
 ///    |             |             |
 /// NonCore1      NonCore2      NonCore3
 /// ```
-fn build_multi_isd_topology() -> Result<Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>, NetworkError> {
+fn build_multi_isd_topology(
+) -> Result<Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>, NetworkError> {
     let mut net = Network::default();
 
     println!("Creating multi-ISD topology...");
@@ -514,13 +575,13 @@ fn build_multi_isd_topology() -> Result<Network<SimplePrefix, BasicEventQueue<Si
 
     // Enable SCION
     println!("Enabling SCION...");
-    net.enable_scion(core1, IsdAs::new(1, 110u64), true)?;  // Core
+    net.enable_scion(core1, IsdAs::new(1, 110u64), true)?; // Core
     net.enable_scion(nc1, IsdAs::new(1, 111u64), false)?;
 
-    net.enable_scion(core2, IsdAs::new(2, 210u64), true)?;  // Core
+    net.enable_scion(core2, IsdAs::new(2, 210u64), true)?; // Core
     net.enable_scion(nc2, IsdAs::new(2, 211u64), false)?;
 
-    net.enable_scion(core3, IsdAs::new(3, 310u64), true)?;  // Core
+    net.enable_scion(core3, IsdAs::new(3, 310u64), true)?; // Core
     net.enable_scion(nc3, IsdAs::new(3, 311u64), false)?;
 
     println!("  SCION enabled on all routers");
@@ -551,7 +612,9 @@ fn build_multi_isd_topology() -> Result<Network<SimplePrefix, BasicEventQueue<Si
 }
 
 /// Validate that foreign ISD PCBs are propagated correctly
-fn validate_multi_isd_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_multi_isd_pcb_propagation(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Multi-ISD PCB Propagation ===");
 
     // Per spec lines 382-383:
@@ -564,13 +627,18 @@ fn validate_multi_isd_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueu
     let nc2 = net.get_router_id("NonCore2")?;
 
     // NonCore1 should have received PCBs from Core1 (including foreign ISD PCBs)
-    let nc1_scion = net.get_router(nc1)?.scion()
+    let nc1_scion = net
+        .get_router(nc1)?
+        .scion()
         .expect("NonCore1 should have SCION enabled");
     let nc1_pcbs = nc1_scion.beacon_store.get_all();
 
     println!("Checking NonCore1 (ISD 1) received PCBs...");
     println!("  ✓ NonCore1 has {} PCBs in beacon store", nc1_pcbs.len());
-    assert!(!nc1_pcbs.is_empty(), "NonCore1 should have received PCBs from Core1");
+    assert!(
+        !nc1_pcbs.is_empty(),
+        "NonCore1 should have received PCBs from Core1"
+    );
 
     // Check if any PCBs originate from foreign ISDs
     let mut foreign_isd_count = 0;
@@ -593,7 +661,9 @@ fn validate_multi_isd_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueu
     }
 
     // Similarly check NonCore2
-    let nc2_scion = net.get_router(nc2)?.scion()
+    let nc2_scion = net
+        .get_router(nc2)?
+        .scion()
         .expect("NonCore2 should have SCION enabled");
     let nc2_pcbs = nc2_scion.beacon_store.get_all();
 
@@ -607,7 +677,9 @@ fn validate_multi_isd_pcb_propagation(net: &Network<SimplePrefix, BasicEventQueu
 }
 
 /// Validate inter-ISD path segments are created correctly
-fn validate_inter_isd_path_segments(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_inter_isd_path_segments(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Inter-ISD Path Segments ===");
 
     let nc1 = net.get_router_id("NonCore1")?;
@@ -641,7 +713,9 @@ fn validate_inter_isd_path_segments(net: &Network<SimplePrefix, BasicEventQueue<
 }
 
 /// Validate inter-ISD path lookup works correctly
-fn validate_inter_isd_path_lookup(net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_inter_isd_path_lookup(
+    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Inter-ISD Path Lookup ===");
 
     let nc1 = net.get_router_id("NonCore1")?;
@@ -661,7 +735,9 @@ fn validate_inter_isd_path_lookup(net: &Network<SimplePrefix, BasicEventQueue<Si
         for (i, path) in paths_12.iter().enumerate() {
             print!("    Path {}: ", i + 1);
             for (j, isd_as) in path.as_path.iter().enumerate() {
-                if j > 0 { print!(" → "); }
+                if j > 0 {
+                    print!(" → ");
+                }
                 print!("{}", isd_as);
             }
             println!();
@@ -693,7 +769,9 @@ fn validate_inter_isd_path_lookup(net: &Network<SimplePrefix, BasicEventQueue<Si
 }
 
 /// Validate spec-recommended parameters are used
-fn validate_spec_parameters(_net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>) -> Result<(), NetworkError> {
+fn validate_spec_parameters(
+    _net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>,
+) -> Result<(), NetworkError> {
     println!("=== Validating Spec-Recommended Parameters ===");
 
     // Per spec draft-dekater-scion-controlplane-10:
@@ -701,23 +779,47 @@ fn validate_spec_parameters(_net: &Network<SimplePrefix, BasicEventQueue<SimpleP
 
     // Line 1558: "At most 50 PCBs per child link are propagated"
     println!("  ✓ max_pcbs = {} (spec: 50)", DEFAULT_MAX_PCBS);
-    assert_eq!(DEFAULT_MAX_PCBS, 50, "DEFAULT_MAX_PCBS should be 50 per spec");
+    assert_eq!(
+        DEFAULT_MAX_PCBS, 50,
+        "DEFAULT_MAX_PCBS should be 50 per spec"
+    );
 
     // Line 1263: Propagation intervals
-    println!("  ✓ intra_isd_interval = {}s (spec: ≥5s)", DEFAULT_INTRA_ISD_INTERVAL);
-    assert!(DEFAULT_INTRA_ISD_INTERVAL >= 5, "Interval should be at least 5s");
+    println!(
+        "  ✓ intra_isd_interval = {}s (spec: ≥5s)",
+        DEFAULT_INTRA_ISD_INTERVAL
+    );
+    assert!(
+        DEFAULT_INTRA_ISD_INTERVAL >= 5,
+        "Interval should be at least 5s"
+    );
 
-    println!("  ✓ core_interval = {}s (spec: ≥60s)", DEFAULT_CORE_INTERVAL);
-    assert!(DEFAULT_CORE_INTERVAL >= 60, "Core interval should be at least 60s");
+    println!(
+        "  ✓ core_interval = {}s (spec: ≥60s)",
+        DEFAULT_CORE_INTERVAL
+    );
+    assert!(
+        DEFAULT_CORE_INTERVAL >= 60,
+        "Core interval should be at least 60s"
+    );
 
     // Line 1528: Hop expiration
-    println!("  ✓ hop_expiration = {}s ({} hours, spec: ~6 hours)",
-        DEFAULT_HOP_EXPIRATION, DEFAULT_HOP_EXPIRATION / 3600);
-    assert_eq!(DEFAULT_HOP_EXPIRATION, 21600, "Hop expiration should be 6 hours");
+    println!(
+        "  ✓ hop_expiration = {}s ({} hours, spec: ~6 hours)",
+        DEFAULT_HOP_EXPIRATION,
+        DEFAULT_HOP_EXPIRATION / 3600
+    );
+    assert_eq!(
+        DEFAULT_HOP_EXPIRATION, 21600,
+        "Hop expiration should be 6 hours"
+    );
 
     // Line 1544: Core max PCBs
     println!("  ✓ max_core_pcbs = {} (spec: ≤5)", DEFAULT_MAX_CORE_PCBS);
-    assert_eq!(DEFAULT_MAX_CORE_PCBS, 5, "Core max PCBs should be 5 per spec");
+    assert_eq!(
+        DEFAULT_MAX_CORE_PCBS, 5,
+        "Core max PCBs should be 5 per spec"
+    );
 
     println!("✓ All parameters match spec recommendations");
     println!("  Reference: draft-dekater-scion-controlplane-10");

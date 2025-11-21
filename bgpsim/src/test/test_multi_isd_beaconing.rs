@@ -43,8 +43,7 @@ mod t {
     #[test]
     fn test_basic_multi_isd_beaconing<P: Prefix>() {
         // Create network
-        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> =
-            Network::default();
+        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> = Network::default();
 
         // ISD 1
         let core1 = net.add_router("core1", ASN(110));
@@ -60,11 +59,13 @@ mod t {
         net.add_link(core2, leaf2).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1u16, 110u64), true).unwrap(); // Core
+        net.enable_scion(core1, IsdAs::new(1u16, 110u64), true)
+            .unwrap(); // Core
         net.enable_scion(leaf1, IsdAs::new(1u16, 111u64), false)
             .unwrap(); // Non-core
 
-        net.enable_scion(core2, IsdAs::new(2u16, 210u64), true).unwrap(); // Core
+        net.enable_scion(core2, IsdAs::new(2u16, 210u64), true)
+            .unwrap(); // Core
         net.enable_scion(leaf2, IsdAs::new(2u16, 211u64), false)
             .unwrap(); // Non-core
 
@@ -105,10 +106,7 @@ mod t {
         // Verify inter-ISD path lookup works
         let paths = net.scion_lookup_paths(leaf1, leaf2).unwrap();
         println!("Found {} paths from leaf1 to leaf2", paths.len());
-        assert!(
-            !paths.is_empty(),
-            "Should find at least one inter-ISD path"
-        );
+        assert!(!paths.is_empty(), "Should find at least one inter-ISD path");
 
         // Verify reverse direction works
         let paths_reverse = net.scion_lookup_paths(leaf2, leaf1).unwrap();
@@ -129,8 +127,7 @@ mod t {
     /// ```
     #[test]
     fn test_three_isd_beaconing<P: Prefix>() {
-        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> =
-            Network::default();
+        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> = Network::default();
 
         // Create routers
         let core1 = net.add_router("core1", ASN(110));
@@ -148,12 +145,18 @@ mod t {
         net.add_link(core3, leaf3).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1u16, 110u64), true).unwrap();
-        net.enable_scion(leaf1, IsdAs::new(1u16, 111u64), false).unwrap();
-        net.enable_scion(core2, IsdAs::new(2u16, 210u64), true).unwrap();
-        net.enable_scion(leaf2, IsdAs::new(2u16, 211u64), false).unwrap();
-        net.enable_scion(core3, IsdAs::new(3u16, 310u64), true).unwrap();
-        net.enable_scion(leaf3, IsdAs::new(3u16, 311u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1u16, 110u64), true)
+            .unwrap();
+        net.enable_scion(leaf1, IsdAs::new(1u16, 111u64), false)
+            .unwrap();
+        net.enable_scion(core2, IsdAs::new(2u16, 210u64), true)
+            .unwrap();
+        net.enable_scion(leaf2, IsdAs::new(2u16, 211u64), false)
+            .unwrap();
+        net.enable_scion(core3, IsdAs::new(3u16, 310u64), true)
+            .unwrap();
+        net.enable_scion(leaf3, IsdAs::new(3u16, 311u64), false)
+            .unwrap();
 
         // Configure SCION links
         net.configure_scion_link(core1, core2, ScionLinkType::Core)
@@ -204,8 +207,7 @@ mod t {
     /// Ensures the fix doesn't break single-ISD behavior
     #[test]
     fn test_single_isd_still_works<P: Prefix>() {
-        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> =
-            Network::default();
+        let mut net: Network<P, BasicEventQueue<P>, crate::ospf::GlobalOspf> = Network::default();
 
         // Single ISD topology
         let core = net.add_router("core", ASN(110));
@@ -216,10 +218,12 @@ mod t {
         net.add_link(transit, leaf).unwrap();
 
         // All same ISD
-        net.enable_scion(core, IsdAs::new(1u16, 110u64), true).unwrap();
+        net.enable_scion(core, IsdAs::new(1u16, 110u64), true)
+            .unwrap();
         net.enable_scion(transit, IsdAs::new(1u16, 120u64), false)
             .unwrap();
-        net.enable_scion(leaf, IsdAs::new(1u16, 130u64), false).unwrap();
+        net.enable_scion(leaf, IsdAs::new(1u16, 130u64), false)
+            .unwrap();
 
         net.configure_scion_link(core, transit, ScionLinkType::ParentChild)
             .unwrap();

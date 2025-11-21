@@ -20,6 +20,7 @@
 //! beaconing rounds.
 
 use crate::{
+    event::Event,
     network::Network,
     ospf::OspfImpl,
     scion::{
@@ -100,6 +101,7 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         isd_as: IsdAs,
         is_core: bool,
     ) -> Result<(), NetworkError> {
+        let mode = self.scion_mode;
         let r = self.get_router_mut(router)?;
 
         // Check if SCION is already enabled
@@ -107,8 +109,13 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             return Err(NetworkError::DeviceNotFound(router)); // Reuse existing error
         }
 
-        // Create and enable SCION control service
-        r.enable_scion(isd_as, is_core);
+        // Create and enable SCION control service on router (backwards compatibility)
+        r.enable_scion_with_mode(isd_as, is_core, mode);
+
+        // Also register with AS-level infrastructure (for new multi-router AS support)
+        self.create_scion_as(isd_as, is_core)?;
+        self.add_router_to_scion_as(router, isd_as)?;
+        self.apply_core_propagation_limit();
 
         Ok(())
     }
@@ -123,6 +130,8 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     pub fn disable_scion(&mut self, router: RouterId) -> Result<(), NetworkError> {
         let r = self.get_router_mut(router)?;
         r.disable_scion();
+        self.invalidate_core_diameter();
+        self.apply_core_propagation_limit();
         Ok(())
     }
 
@@ -166,14 +175,38 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             (if_a, if_b)
         };
 
-        // Add interfaces to both routers
+        // Add interfaces to both routers (for backwards compatibility)
         let cs_a = self.get_router_mut(router_a)?.scion_mut().unwrap();
-        cs_a.add_interface(InterfaceInfo::new(if_a, isd_as_b, link_type, router_b, 1500))
-            .expect("Failed to add SCION interface");
+        cs_a.add_interface(InterfaceInfo::new(
+            if_a, isd_as_b, link_type, router_b, 1500,
+        ))
+        .expect("Failed to add SCION interface");
 
         let cs_b = self.get_router_mut(router_b)?.scion_mut().unwrap();
-        cs_b.add_interface(InterfaceInfo::new(if_b, isd_as_a, link_type, router_a, 1500))
-            .expect("Failed to add SCION interface");
+        cs_b.add_interface(InterfaceInfo::new(
+            if_b, isd_as_a, link_type, router_a, 1500,
+        ))
+        .expect("Failed to add SCION interface");
+
+        // Also add interfaces to AS-level infrastructure for beaconing
+        if let Some(as_a) = self.scion_ases.get_mut(&isd_as_a) {
+            as_a.add_interface_for_router(
+                InterfaceInfo::new(if_a, isd_as_b, link_type, router_b, 1500),
+                router_a,
+            )
+            .ok(); // Ignore errors if already exists
+        }
+
+        if let Some(as_b) = self.scion_ases.get_mut(&isd_as_b) {
+            as_b.add_interface_for_router(
+                InterfaceInfo::new(if_b, isd_as_a, link_type, router_a, 1500),
+                router_b,
+            )
+            .ok(); // Ignore errors if already exists
+        }
+
+        self.invalidate_core_diameter();
+        self.apply_core_propagation_limit();
 
         Ok(())
     }
@@ -188,49 +221,57 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// # Returns
     /// `Ok(num_pcbs_created)` - number of PCBs created
     pub fn scion_core_beaconing(&mut self, timestamp: u32) -> Result<usize, NetworkError> {
-        let mut created_pcbs: Vec<(RouterId, Vec<(RouterId, Pcb<P>)>)> = Vec::new();
+        let mut created_pcbs: Vec<Vec<(RouterId, Pcb<P>)>> = Vec::new();
 
-        // Step 1: Generate PCBs at core ASes
-        let router_ids: Vec<RouterId> = self.routers.keys().copied().collect();
-        for router_id in router_ids {
-            let router = self.get_router(router_id)?;
+        // Step 1: Generate PCBs at core ASes (iterate over ASes, not routers!)
+        // PERFORMANCE: O(num_ases) instead of O(num_routers)
+        // For 100K routers with 5K ASes: 5K iterations instead of 100K!
+        let as_ids: Vec<crate::scion::IsdAs> = self.scion_ases.keys().copied().collect();
+        for isd_as in as_ids {
+            let scion_as = self.scion_ases.get(&isd_as).unwrap();
 
-            if let Some(cs) = router.scion() {
-                if cs.is_core {
-                    let isd_as = cs.isd_as;
+            if scion_as.is_core {
+                // Core ASes send beacons to ALL neighbors (core and non-core)
+                let all_interfaces = scion_as.control_service.get_all_interfaces();
 
-                    // Core ASes send beacons to ALL neighbors (core and non-core)
-                    let all_interfaces = cs.get_all_interfaces();
+                let mut pcbs_for_as = Vec::new();
 
-                    let mut pcbs_for_router = Vec::new();
+                // Create a PCB for each neighbor interface
+                for interface in all_interfaces {
+                    let pcb = create_initial_pcb(
+                        isd_as,
+                        timestamp,
+                        interface.interface_id,
+                        interface.mtu,
+                    );
 
-                    // Create a PCB for each neighbor
-                    for interface in all_interfaces {
-                        let pcb = create_initial_pcb(
-                            isd_as,
-                            timestamp,
-                            interface.interface_id,
-                            interface.mtu,
-                        );
+                    pcbs_for_as.push((interface.neighbor_router, pcb));
+                }
 
-                        pcbs_for_router.push((interface.neighbor_router, pcb));
-                    }
-
-                    if !pcbs_for_router.is_empty() {
-                        created_pcbs.push((router_id, pcbs_for_router));
-                    }
+                if !pcbs_for_as.is_empty() {
+                    created_pcbs.push(pcbs_for_as);
                 }
             }
         }
 
-        // Step 2: Deliver PCBs to neighbors
+        // Step 2: Deliver PCBs to neighbors and store at AS level
+        // SPEC-COMPLIANT: "An AS stores candidate PCBs in a temporary storage called the Beacon Store"
+        //                 (draft-dekater-scion-controlplane-10, Section 4.2.2)
         let mut total_created = 0;
-        for (_src_router, pcbs) in created_pcbs {
+        for pcbs in created_pcbs {
             for (dst_router, pcb) in pcbs {
-                // Store the PCB at the destination
-                let dst = self.get_router_mut(dst_router)?;
-                if let Some(cs) = dst.scion_mut() {
-                    cs.beacon_store.insert(pcb);
+                // Find which AS this router belongs to
+                let dst_isd_as = {
+                    let router = self.get_router(dst_router)?;
+                    router
+                        .scion()
+                        .ok_or(NetworkError::DeviceNotFound(dst_router))?
+                        .isd_as
+                };
+
+                // Store PCB at AS level (not router level)
+                if let Some(scion_as) = self.scion_ases.get_mut(&dst_isd_as) {
+                    scion_as.control_service.beacon_store.insert(pcb);
                     total_created += 1;
                 }
             }
@@ -256,121 +297,129 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         max_propagate: usize,
     ) -> Result<usize, NetworkError> {
         let policy = SimpleSelectionPolicy;
-        let mut propagated_pcbs: Vec<(RouterId, Vec<(RouterId, Pcb<P>)>)> = Vec::new();
+        let mut propagated_pcbs: Vec<Vec<(RouterId, Pcb<P>)>> = Vec::new();
 
-        // Step 1: Each AS selects PCBs and prepares propagation
-        let router_ids: Vec<RouterId> = self.routers.keys().copied().collect();
-        for router_id in router_ids {
-            let router = self.get_router(router_id)?;
+        // Step 1: Each AS selects PCBs and prepares propagation (iterate over ASes, not routers!)
+        // PERFORMANCE: O(num_ases) instead of O(num_routers)
+        // For 100K routers with 5K ASes: 5K iterations instead of 100K!
+        let as_ids: Vec<crate::scion::IsdAs> = self.scion_ases.keys().copied().collect();
+        for isd_as in as_ids {
+            let scion_as = self.scion_ases.get(&isd_as).unwrap();
+            let is_core = scion_as.is_core;
 
-            if let Some(cs) = router.scion() {
-                let isd_as = cs.isd_as;
-                let is_core = cs.is_core;
+            // Get all PCBs from AS-level beacon store
+            // SPEC-COMPLIANT: Reading from AS-level storage (not router-level)
+            let all_pcbs = scion_as.control_service.beacon_store.get_all();
 
-                // Get all PCBs from beacon store
-                let all_pcbs = cs.beacon_store.get_all();
+            // Skip if no PCBs to propagate
+            if all_pcbs.is_empty() {
+                continue;
+            }
 
-                // Skip if no PCBs to propagate
-                if all_pcbs.is_empty() {
-                    continue;
-                }
-
-                // Filter PCBs based on AS type:
-                // - Core ASes propagate PCBs from ALL ISDs (they're the inter-ISD gateway)
-                // - Non-core ASes only propagate same-ISD PCBs
-                //
-                // Per spec: "core beaconing... between core ASes in the same or in different ISDs"
-                // Core ASes MUST propagate foreign ISD PCBs downward to enable inter-ISD connectivity
-                let pcbs_to_propagate: Vec<Pcb<P>> = if is_core {
-                    // Core ASes: propagate ALL PCBs (including from foreign ISDs)
-                    all_pcbs.iter().map(|p| (*p).clone()).collect()
-                } else {
-                    // Non-core ASes: only propagate same-ISD PCBs
-                    all_pcbs
-                        .iter()
-                        .filter(|pcb| {
-                            if let Some(origin) = pcb.get_origin() {
-                                origin.isd == isd_as.isd
-                            } else {
-                                false
-                            }
-                        })
-                        .map(|p| (*p).clone())
-                        .collect()
-                };
-
-                // Skip if no PCBs to propagate
-                if pcbs_to_propagate.is_empty() {
-                    continue;
-                }
-
-                // Select PCBs to propagate
-                let selected_pcbs = select_for_propagation(&pcbs_to_propagate, &policy, max_propagate);
-
-                // Get child and peering interfaces
-                let child_interfaces = cs.get_child_interfaces();
-                let peering_interfaces = cs.get_peering_interfaces();
-
-                // Prepare peering entries
-                let peering_entries: Vec<(IsdAs, InterfaceId, InterfaceId, u16)> =
-                    peering_interfaces
-                        .iter()
-                        .map(|iface| {
-                            (
-                                iface.neighbor_isd_as,
-                                iface.interface_id,
-                                iface.interface_id, // peer's interface (simplified)
-                                iface.mtu,
-                            )
-                        })
-                        .collect();
-
-                let mut pcbs_to_send = Vec::new();
-
-                // For each selected PCB, extend it and send to children
-                for pcb in selected_pcbs {
-                    for child_interface in &child_interfaces {
-                        // Skip if this would create a loop
-                        if pcb.get_as_path().contains(&child_interface.neighbor_isd_as) {
-                            continue;
+            // Filter PCBs based on AS type:
+            // - Core ASes propagate PCBs from ALL ISDs (they're the inter-ISD gateway)
+            // - Non-core ASes only propagate same-ISD PCBs
+            //
+            // Per spec: "core beaconing... between core ASes in the same or in different ISDs"
+            // Core ASes MUST propagate foreign ISD PCBs downward to enable inter-ISD connectivity
+            let pcbs_to_propagate: Vec<Pcb<P>> = if is_core {
+                // Core ASes: propagate ALL PCBs (including from foreign ISDs)
+                all_pcbs.iter().map(|p| (*p).clone()).collect()
+            } else {
+                // Non-core ASes: only propagate same-ISD PCBs
+                all_pcbs
+                    .iter()
+                    .filter(|pcb| {
+                        if let Some(origin) = pcb.get_origin() {
+                            origin.isd == isd_as.isd
+                        } else {
+                            false
                         }
+                    })
+                    .map(|p| (*p).clone())
+                    .collect()
+            };
 
-                        // Extend the PCB with this AS's entry
-                        let mut extended_pcb = extend_pcb(
-                            pcb.clone(),
-                            isd_as,
-                            child_interface.interface_id,
-                            child_interface.interface_id,
-                            child_interface.mtu,
-                            timestamp,
-                        );
+            // Skip if no PCBs to propagate
+            if pcbs_to_propagate.is_empty() {
+                continue;
+            }
 
-                        // Add peering entries if we have any
-                        if !peering_entries.is_empty() {
-                            extended_pcb =
-                                add_peering_entries(extended_pcb, peering_entries.clone(), timestamp);
-                        }
+            // Select PCBs to propagate
+            let selected_pcbs = select_for_propagation(&pcbs_to_propagate, &policy, max_propagate);
 
-                        // Validate the extended PCB
-                        if validate_pcb(&extended_pcb, timestamp, is_core).is_ok() {
-                            pcbs_to_send.push((child_interface.neighbor_router, extended_pcb));
-                        }
+            // Get child and peering interfaces from AS's control service
+            let child_interfaces = scion_as.control_service.get_child_interfaces();
+            let peering_interfaces = scion_as.control_service.get_peering_interfaces();
+
+            // Prepare peering entries
+            let peering_entries: Vec<(IsdAs, InterfaceId, InterfaceId, u16)> = peering_interfaces
+                .iter()
+                .map(|iface| {
+                    (
+                        iface.neighbor_isd_as,
+                        iface.interface_id,
+                        iface.interface_id, // peer's interface (simplified)
+                        iface.mtu,
+                    )
+                })
+                .collect();
+
+            let mut pcbs_to_send = Vec::new();
+
+            // For each selected PCB, extend it and send to children
+            for pcb in selected_pcbs {
+                for child_interface in &child_interfaces {
+                    // Skip if this would create a loop
+                    if pcb.get_as_path().contains(&child_interface.neighbor_isd_as) {
+                        continue;
+                    }
+
+                    // Extend the PCB with this AS's entry
+                    let mut extended_pcb = extend_pcb(
+                        pcb.clone(),
+                        isd_as,
+                        child_interface.interface_id,
+                        child_interface.interface_id,
+                        child_interface.mtu,
+                        timestamp,
+                    );
+
+                    // Add peering entries if we have any
+                    if !peering_entries.is_empty() {
+                        extended_pcb =
+                            add_peering_entries(extended_pcb, peering_entries.clone(), timestamp);
+                    }
+
+                    // Validate the extended PCB
+                    if validate_pcb(&extended_pcb, timestamp, is_core).is_ok() {
+                        pcbs_to_send.push((child_interface.neighbor_router, extended_pcb));
                     }
                 }
+            }
 
-                if !pcbs_to_send.is_empty() {
-                    propagated_pcbs.push((router_id, pcbs_to_send));
-                }
+            if !pcbs_to_send.is_empty() {
+                propagated_pcbs.push(pcbs_to_send);
             }
         }
 
-        // Step 2: Deliver propagated PCBs to children
+        // Step 2: Deliver propagated PCBs to children and store at AS level
+        // SPEC-COMPLIANT: Store PCBs at AS level (not router level)
         let mut total_propagated = 0;
-        for (_src_router, pcbs) in propagated_pcbs {
+        for pcbs in propagated_pcbs {
             for (dst_router, pcb) in pcbs {
-                let dst = self.get_router_mut(dst_router)?;
-                if let Some(cs) = dst.scion_mut() {
-                    cs.beacon_store.insert(pcb);
+                // Find which AS this router belongs to
+                let dst_isd_as = {
+                    let router = self.get_router(dst_router)?;
+                    router
+                        .scion()
+                        .ok_or(NetworkError::DeviceNotFound(dst_router))?
+                        .isd_as
+                };
+
+                // Store PCB at AS level
+                if let Some(scion_as) = self.scion_ases.get_mut(&dst_isd_as) {
+                    scion_as.control_service.beacon_store.insert(pcb);
                     total_propagated += 1;
                 }
             }
@@ -404,7 +453,10 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     ///
     /// # Returns
     /// Reference to the beacon store if SCION is enabled, None otherwise
-    pub fn get_scion_beacon_store(&self, router: RouterId) -> Result<&BeaconStore<P>, NetworkError> {
+    pub fn get_scion_beacon_store(
+        &self,
+        router: RouterId,
+    ) -> Result<&BeaconStore<P>, NetworkError> {
         let r = self.get_router(router)?;
         r.scion()
             .map(|cs| &cs.beacon_store)
@@ -433,64 +485,111 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     ///
     /// # Returns
     /// `Ok(num_segments_registered)` - number of up-segments registered
+    /// **[SPEC-COMPLIANT]** Register up-segments at AS level.
+    ///
+    /// Non-core ASes create up-segments from their PCBs and register them at parent core ASes.
+    /// Per draft-dekater-scion-controlplane-10: "An AS stores path segments in its path database"
+    ///
+    /// **AS-Level Storage:** Both PCB reading and segment registration happen at AS level.
     pub fn scion_register_up_segments(&mut self, max_select: usize) -> Result<usize, NetworkError> {
+        use crate::scion::beaconing::{extend_pcb, terminate_pcb};
         use crate::scion::{PathSegment, SegmentType};
 
         let policy = SimpleSelectionPolicy;
-        let mut segments_to_register: Vec<(RouterId, PathSegment<P>)> = Vec::new();
+        let mut segments_to_register: Vec<(IsdAs, PathSegment<P>)> = Vec::new();
 
-        // Step 1: Non-core ASes create up-segments
-        let router_ids: Vec<RouterId> = self.routers.keys().copied().collect();
-        for router_id in router_ids {
-            let router = self.get_router(router_id)?;
+        // Step 1: Non-core ASes create up-segments (AS-level iteration)
+        let as_ids: Vec<IsdAs> = self.scion_ases.keys().copied().collect();
+        for isd_as in as_ids {
+            let scion_as = self.scion_ases.get(&isd_as).unwrap();
 
-            if let Some(cs) = router.scion() {
-                // Only non-core ASes register up-segments
-                if cs.is_core {
-                    continue;
-                }
+            // Only non-core ASes register up-segments
+            if scion_as.is_core {
+                continue;
+            }
 
-                // Get all PCBs from beacon store
-                let all_pcbs = cs.beacon_store.get_all();
-                if all_pcbs.is_empty() {
-                    continue;
-                }
+            // Get all PCBs from AS-level beacon store
+            let all_pcbs = scion_as.control_service.beacon_store.get_all();
+            if all_pcbs.is_empty() {
+                continue;
+            }
 
-                // Select PCBs to register
-                let all_pcbs_owned: Vec<Pcb<P>> = all_pcbs.iter().map(|p| (*p).clone()).collect();
-                let selected_pcbs = select_for_propagation(&all_pcbs_owned, &policy, max_select);
+            // ✅ SPEC-COMPLIANT: Non-core ASes only create up-segments to cores in same ISD
+            // Filter out foreign ISD PCBs (they're used for core segment creation, not up-segments)
+            let all_pcbs_owned: Vec<Pcb<P>> = all_pcbs
+                .iter()
+                .filter(|pcb| {
+                    // Keep PCBs that are from same ISD
+                    if let Some(origin) = pcb.get_origin() {
+                        origin.isd == isd_as.isd
+                    } else {
+                        false
+                    }
+                })
+                .map(|p| (*p).clone())
+                .collect();
 
-                // Get parent interfaces (to determine where to register)
-                let parent_interfaces = cs.get_parent_interfaces();
-                let isd_as = cs.isd_as;
+            if all_pcbs_owned.is_empty() {
+                continue;
+            }
 
-                // Convert each selected PCB to an up-segment and register at parent core
-                for pcb in selected_pcbs {
-                    // Extend PCB with this AS before creating up-segment
-                    for parent_interface in &parent_interfaces {
-                        let extended_pcb = extend_pcb(
-                            pcb.clone(),
-                            isd_as,
-                            parent_interface.interface_id,
-                            parent_interface.interface_id,
-                            parent_interface.mtu,
-                            pcb.segment_info.timestamp,
-                        );
+            // Select PCBs to register
+            let selected_pcbs = select_for_propagation(&all_pcbs_owned, &policy, max_select);
 
-                        let up_segment = PathSegment::from_pcb(&extended_pcb, SegmentType::Up);
-                        let parent_router = parent_interface.neighbor_router;
-                        segments_to_register.push((parent_router, up_segment));
+            // Get parent interfaces (to determine where to register)
+            let parent_interfaces = scion_as.control_service.get_parent_interfaces();
+
+            // Convert each selected PCB to an up-segment and register at destination core
+            for pcb in selected_pcbs {
+                // Extend PCB with this AS before creating up-segment
+                for parent_interface in &parent_interfaces {
+                    // First extend the PCB with this AS's entry
+                    let extended_pcb = extend_pcb(
+                        pcb.clone(),
+                        isd_as,
+                        parent_interface.interface_id,
+                        parent_interface.interface_id,
+                        parent_interface.mtu,
+                        pcb.segment_info.timestamp,
+                    );
+
+                    // ✅ SPEC-COMPLIANT: Terminate the PCB per §4.1.1
+                    // Final AS entry must have egress=0 (UNSPECIFIED) and peer entries' egress=0
+                    let terminated_pcb = terminate_pcb(extended_pcb, pcb.segment_info.timestamp);
+
+                    let up_segment = PathSegment::from_pcb(&terminated_pcb, SegmentType::Up);
+
+                    // ✅ SPEC-COMPLIANT: Filter out foreign ISD segments
+                    // Per spec Section 4.1.2: Up-segments go to cores in the SAME ISD
+                    if let Some(dest_isd_as) = up_segment.destination() {
+                        if dest_isd_as.isd != isd_as.isd {
+                            // Skip foreign ISD destinations
+                            continue;
+                        }
+
+                        // ✅ Register at source non-core AS (local cache for path lookup)
+                        // This enables non-core ASes to do path lookup without querying cores
+                        segments_to_register.push((isd_as, up_segment.clone()));
+
+                        // ✅ SPEC-COMPLIANT: Also register at destination core AS
+                        // Per SCION spec: "Up-segments are registered at core ASes"
+                        // The segment's destination is the core AS it reaches
+                        // Verify destination is actually a core AS in the same ISD
+                        if let Some(dest_as) = self.scion_ases.get(&dest_isd_as) {
+                            if dest_as.is_core {
+                                segments_to_register.push((dest_isd_as, up_segment));
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Step 2: Register up-segments at core ASes
+        // Step 2: Register up-segments at core ASes (AS-level storage)
         let mut total_registered = 0;
-        for (core_router, segment) in segments_to_register {
-            let core = self.get_router_mut(core_router)?;
-            if let Some(cs) = core.scion_mut() {
-                cs.register_up_segment(segment).ok();
+        for (core_isd_as, segment) in segments_to_register {
+            if let Some(core_as) = self.scion_ases.get_mut(&core_isd_as) {
+                core_as.control_service.register_up_segment(segment).ok();
                 total_registered += 1;
             }
         }
@@ -498,35 +597,109 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         Ok(total_registered)
     }
 
-    /// Register down-segments at core ASes.
+    /// **[SPEC-COMPLIANT]** Register down-segments at AS level.
     ///
-    /// Core ASes create down-segments by reversing the up-segments they've received.
+    /// Per spec §4.1.3: Non-core ASes transform PCBs into down-segments and register them
+    /// with the Control Services of the core ASes that originated the corresponding PCBs.
+    ///
+    /// **AS-Level Storage:** Segment reading and registration happen at AS level.
     ///
     /// # Returns
     /// `Ok(num_segments_registered)` - number of down-segments registered
     pub fn scion_register_down_segments(&mut self) -> Result<usize, NetworkError> {
+        use crate::scion::beaconing::{extend_pcb, terminate_pcb};
+        use crate::scion::{PathSegment, SegmentType};
+
+        let policy = SimpleSelectionPolicy;
+        let mut segments_to_register: Vec<(IsdAs, PathSegment<P>)> = Vec::new();
+
+        // Step 1: Non-core ASes create down-segments from PCBs (per spec §4.1.3)
+        let as_ids: Vec<IsdAs> = self.scion_ases.keys().copied().collect();
+        for isd_as in as_ids {
+            let scion_as = self.scion_ases.get(&isd_as).unwrap();
+
+            // Only non-core ASes register down-segments (they register with core ASes)
+            if scion_as.is_core {
+                continue;
+            }
+
+            // Get all PCBs from AS-level beacon store
+            let all_pcbs = scion_as.control_service.beacon_store.get_all();
+            if all_pcbs.is_empty() {
+                continue;
+            }
+
+            // ✅ SPEC-COMPLIANT: Non-core ASes only create down-segments to cores in same ISD
+            let all_pcbs_owned: Vec<Pcb<P>> = all_pcbs
+                .iter()
+                .filter(|pcb| {
+                    // Keep PCBs that are from same ISD
+                    if let Some(origin) = pcb.get_origin() {
+                        origin.isd == isd_as.isd
+                    } else {
+                        false
+                    }
+                })
+                .map(|p| (*p).clone())
+                .collect();
+
+            if all_pcbs_owned.is_empty() {
+                continue;
+            }
+
+            // Select PCBs to register (use same limit as up-segments)
+            let max_select = self.scion_mode.up_down_segment_limit();
+            let selected_pcbs = select_for_propagation(&all_pcbs_owned, &policy, max_select);
+
+            // Get parent interfaces (to determine where to register)
+            let parent_interfaces = scion_as.control_service.get_parent_interfaces();
+
+            // Convert each selected PCB to a down-segment and register at originating core
+            for pcb in selected_pcbs {
+                // Extend PCB with this AS before creating down-segment
+                for parent_interface in &parent_interfaces {
+                    // First extend the PCB with this AS's entry
+                    let extended_pcb = extend_pcb(
+                        pcb.clone(),
+                        isd_as,
+                        parent_interface.interface_id,
+                        parent_interface.interface_id,
+                        parent_interface.mtu,
+                        pcb.segment_info.timestamp,
+                    );
+
+                    // ✅ SPEC-COMPLIANT: Terminate the PCB per §4.1.1
+                    let terminated_pcb = terminate_pcb(extended_pcb, pcb.segment_info.timestamp);
+
+                    let down_segment = PathSegment::from_pcb(&terminated_pcb, SegmentType::Down);
+
+                    // ✅ SPEC-COMPLIANT: Register with originating core AS per §4.1.3
+                    // The first ISD-AS entry of the path segment SHOULD equal the core ISD-AS
+                    // where the segment is being registered
+                    if let Some(originating_core) = down_segment.as_path.first() {
+                        // Verify the originating core is actually a core AS
+                        if let Some(core_as) = self.scion_ases.get(originating_core) {
+                            if core_as.is_core && originating_core.isd == isd_as.isd {
+                                // ✅ SPEC-COMPLIANT: Register down-segment at originating core AS
+                                segments_to_register.push((*originating_core, down_segment));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Register all down-segments at their originating core ASes
         let mut total_registered = 0;
-
-        let router_ids: Vec<RouterId> = self.routers.keys().copied().collect();
-        for router_id in router_ids {
-            let router = self.get_router_mut(router_id)?;
-
-            if let Some(cs) = router.scion_mut() {
-                // All ASes can reverse their stored up-segments to create down-segments
-                // In hierarchical topologies, transits have up-segments from leaves
-
-                // Get all up-segments from path database
-                let up_segments = cs.path_database.get_all_segments();
-                let up_segments: Vec<_> = up_segments
-                    .into_iter()
-                    .filter(|seg| matches!(seg.segment_type, crate::scion::SegmentType::Up))
-                    .collect();
-
-                // Reverse each up-segment to create a down-segment
-                for up_segment in up_segments {
-                    let down_segment = up_segment.reverse();
-                    cs.register_down_segment(down_segment).ok();
-                    total_registered += 1;
+        for (core_isd_as, segment) in segments_to_register {
+            if let Some(core_as) = self.scion_ases.get_mut(&core_isd_as) {
+                // ✅ SPEC-COMPLIANT: Validate first entry matches core where registering (§4.1.3)
+                if let Some(first_as) = segment.as_path.first() {
+                    if *first_as == core_isd_as {
+                        core_as.control_service.register_down_segment(segment).ok();
+                        total_registered += 1;
+                    }
+                    // If first AS doesn't match, reject the segment (per spec)
                 }
             }
         }
@@ -534,78 +707,86 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         Ok(total_registered)
     }
 
-    /// Register core-segments at core ASes.
+    /// **[SPEC-COMPLIANT]** Register core-segments at AS level.
     ///
     /// Core ASes convert PCBs from core beaconing into core-segments.
+    /// Per draft-dekater-scion-controlplane-10: "An AS stores path segments in its path database"
+    ///
+    /// **AS-Level Storage:** Both PCB reading and segment registration happen at AS level.
     ///
     /// # Arguments
     /// * `max_select` - Maximum number of PCBs to select per AS
     ///
     /// # Returns
     /// `Ok(num_segments_registered)` - number of core-segments registered
-    pub fn scion_register_core_segments(&mut self, max_select: usize) -> Result<usize, NetworkError> {
+    pub fn scion_register_core_segments(
+        &mut self,
+        max_select: usize,
+    ) -> Result<usize, NetworkError> {
+        use crate::scion::beaconing::{extend_pcb, terminate_pcb};
         use crate::scion::{PathSegment, SegmentType};
 
         let policy = SimpleSelectionPolicy;
-        let mut segments_to_register: Vec<(RouterId, PathSegment<P>)> = Vec::new();
+        let mut segments_to_register: Vec<(IsdAs, PathSegment<P>)> = Vec::new();
 
-        // Step 1: Collect and extend PCBs to create core segments
-        let router_ids: Vec<RouterId> = self.routers.keys().copied().collect();
-        for router_id in router_ids {
-            let router = self.get_router(router_id)?;
+        // Step 1: Collect and extend PCBs to create core segments (AS-level iteration)
+        let as_ids: Vec<IsdAs> = self.scion_ases.keys().copied().collect();
+        for isd_as in as_ids {
+            let scion_as = self.scion_ases.get(&isd_as).unwrap();
 
-            if let Some(cs) = router.scion() {
-                // Only core ASes register core-segments
-                if !cs.is_core {
-                    continue;
-                }
+            // Only core ASes register core-segments
+            if !scion_as.is_core {
+                continue;
+            }
 
-                // Get all PCBs from beacon store
-                let all_pcbs = cs.beacon_store.get_all();
-                if all_pcbs.is_empty() {
-                    continue;
-                }
+            // Get all PCBs from AS-level beacon store
+            let all_pcbs = scion_as.control_service.beacon_store.get_all();
+            if all_pcbs.is_empty() {
+                continue;
+            }
 
-                // Select PCBs to register
-                let all_pcbs_owned: Vec<Pcb<P>> = all_pcbs.iter().map(|p| (*p).clone()).collect();
-                let selected_pcbs = select_for_propagation(&all_pcbs_owned, &policy, max_select);
+            // Select PCBs to register
+            let all_pcbs_owned: Vec<Pcb<P>> = all_pcbs.iter().map(|p| (*p).clone()).collect();
+            let selected_pcbs = select_for_propagation(&all_pcbs_owned, &policy, max_select);
 
-                // Get core interfaces to determine how to extend PCBs
-                let core_interfaces = cs.get_core_interfaces();
-                let isd_as = cs.isd_as;
+            // Get core interfaces to determine how to extend PCBs
+            let core_interfaces = scion_as.control_service.get_core_interfaces();
 
-                // For each selected PCB, extend it with this AS and convert to core-segment
-                for pcb in selected_pcbs {
-                    // Core PCBs are extended with core interface information
-                    // We need to find which interface this PCB came from
-                    // For simplicity, use the first core interface
-                    if let Some(core_interface) = core_interfaces.first() {
-                        let extended_pcb = extend_pcb(
-                            pcb.clone(),
-                            isd_as,
-                            core_interface.interface_id,
-                            core_interface.interface_id,
-                            core_interface.mtu,
-                            pcb.segment_info.timestamp,
-                        );
+            // For each selected PCB, extend it with this AS and convert to core-segment
+            for pcb in selected_pcbs {
+                // Core PCBs are extended with core interface information
+                // We need to find which interface this PCB came from
+                // For simplicity, use the first core interface
+                if let Some(core_interface) = core_interfaces.first() {
+                    // First extend the PCB with this AS's entry
+                    let extended_pcb = extend_pcb(
+                        pcb.clone(),
+                        isd_as,
+                        core_interface.interface_id,
+                        core_interface.interface_id,
+                        core_interface.mtu,
+                        pcb.segment_info.timestamp,
+                    );
 
-                        let core_segment = PathSegment::from_pcb(&extended_pcb, SegmentType::Core);
+                    // ✅ SPEC-COMPLIANT: Terminate the PCB per §4.1.1
+                    // Final AS entry must have egress=0 (UNSPECIFIED) and peer entries' egress=0
+                    let terminated_pcb = terminate_pcb(extended_pcb, pcb.segment_info.timestamp);
 
-                        // Register both directions for bidirectional core links
-                        segments_to_register.push((router_id, core_segment.clone()));
-                        let reversed_segment = core_segment.reverse();
-                        segments_to_register.push((router_id, reversed_segment));
-                    }
+                    let core_segment = PathSegment::from_pcb(&terminated_pcb, SegmentType::Core);
+
+                    // Register both directions for bidirectional core links
+                    segments_to_register.push((isd_as, core_segment.clone()));
+                    let reversed_segment = core_segment.reverse();
+                    segments_to_register.push((isd_as, reversed_segment));
                 }
             }
         }
 
-        // Step 2: Register all core segments
+        // Step 2: Register all core segments at AS level
         let mut total_registered = 0;
-        for (router_id, segment) in segments_to_register {
-            let router = self.get_router_mut(router_id)?;
-            if let Some(cs) = router.scion_mut() {
-                cs.register_core_segment(segment).ok();
+        for (isd_as, segment) in segments_to_register {
+            if let Some(scion_as) = self.scion_ases.get_mut(&isd_as) {
+                scion_as.control_service.register_core_segment(segment).ok();
                 total_registered += 1;
             }
         }
@@ -671,14 +852,18 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         src: RouterId,
         dst: RouterId,
     ) -> Result<PathSegments<P>, NetworkError> {
-        // Spec-compliant limit: 50 segments per type (spec line 1558)
-        const MAX_SEGMENTS: usize = 50;
+        // Spec-compliant limit: 50 segments per type (configurable per simulation mode)
+        let segment_cap = self.scion_mode.up_down_segment_limit();
 
         let src_router = self.get_router(src)?;
         let dst_router = self.get_router(dst)?;
 
-        let src_cs = src_router.scion().ok_or(NetworkError::DeviceNotFound(src))?;
-        let dst_cs = dst_router.scion().ok_or(NetworkError::DeviceNotFound(dst))?;
+        let src_cs = src_router
+            .scion()
+            .ok_or(NetworkError::DeviceNotFound(src))?;
+        let dst_cs = dst_router
+            .scion()
+            .ok_or(NetworkError::DeviceNotFound(dst))?;
 
         let src_isd_as = src_cs.isd_as;
         let dst_isd_as = dst_cs.isd_as;
@@ -695,40 +880,45 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 for router_id in self.routers.keys() {
                     if let Ok(r) = self.get_router(*router_id) {
                         if let Some(cs) = r.scion() {
-                            // Check all ASes in the source ISD (not just cores)
                             if cs.isd_as.isd == src_isd_as.isd {
+                                let remaining = segment_cap.saturating_sub(up_segments.len());
+                                if remaining == 0 {
+                                    break;
+                                }
                                 up_segments.extend(
                                     cs.lookup_up_segments_from(&src_isd_as)
                                         .into_iter()
-                                        .take(MAX_SEGMENTS - up_segments.len())
+                                        .take(remaining),
                                 );
-                                if up_segments.len() >= MAX_SEGMENTS {
-                                    break;
-                                }
                             }
                         }
                     }
                 }
             }
 
-            // Collect down segments if destination is not core
-            // Note: down-segments are ONLY stored at core ASes (not transits/leaves)
+            // Collect down segments if destination is not core.
+            // Down-segments are registered and stored at the destination ISD's core ASes,
+            // not at the leaf itself, so we must query the cores for segments that end at `dst`.
             if !dst_cs.is_core {
-                for router_id in self.routers.keys() {
-                    if let Ok(r) = self.get_router(*router_id) {
-                        if let Some(cs) = r.scion() {
-                            // Check all ASes in the destination ISD (not just cores)
-                            // In hierarchical topologies, down-segments may be stored at transits
-                            if cs.isd_as.isd == dst_isd_as.isd {
-                                down_segments.extend(
-                                    cs.lookup_down_segments_to(&dst_isd_as)
-                                        .into_iter()
-                                        .take(MAX_SEGMENTS - down_segments.len())
-                                );
-                                if down_segments.len() >= MAX_SEGMENTS {
-                                    break;
-                                }
-                            }
+                for (core_isd_as, core_as) in self
+                    .scion_ases
+                    .iter()
+                    .filter(|(id, sc)| sc.is_core && id.isd == dst_isd_as.isd)
+                {
+                    let remaining = segment_cap.saturating_sub(down_segments.len());
+                    if remaining == 0 {
+                        break;
+                    }
+
+                    let segments = core_as.control_service.lookup_down_segments_to(&dst_isd_as);
+
+                    for seg in segments.into_iter().take(remaining) {
+                        // Sanity-check that the segment actually originates at this core.
+                        if seg.source() == Some(*core_isd_as) {
+                            down_segments.push(seg);
+                        }
+                        if down_segments.len() >= segment_cap {
+                            break;
                         }
                     }
                 }
@@ -736,9 +926,10 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
             // If both are core, get core segments between them
             if src_cs.is_core && dst_cs.is_core {
-                core_segments = src_cs.lookup_core_segments(&src_isd_as, &dst_isd_as)
+                core_segments = src_cs
+                    .lookup_core_segments(&src_isd_as, &dst_isd_as)
                     .into_iter()
-                    .take(MAX_SEGMENTS)
+                    .take(segment_cap)
                     .collect();
             }
         } else {
@@ -751,14 +942,15 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                         if let Some(cs) = r.scion() {
                             // Check all ASes in source ISD (not just cores)
                             if cs.isd_as.isd == src_isd_as.isd {
+                                let remaining = segment_cap.saturating_sub(up_segments.len());
+                                if remaining == 0 {
+                                    break;
+                                }
                                 up_segments.extend(
                                     cs.lookup_up_segments_from(&src_isd_as)
                                         .into_iter()
-                                        .take(MAX_SEGMENTS - up_segments.len())
+                                        .take(remaining),
                                 );
-                                if up_segments.len() >= MAX_SEGMENTS {
-                                    break;
-                                }
                             }
                         }
                     }
@@ -774,19 +966,21 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                                 if let Ok(dr) = self.get_router(*dst_router_id) {
                                     if let Some(dcs) = dr.scion() {
                                         if dcs.is_core && dcs.isd_as.isd == dst_isd_as.isd {
+                                            let remaining =
+                                                segment_cap.saturating_sub(core_segments.len());
+                                            if remaining == 0 {
+                                                break;
+                                            }
                                             core_segments.extend(
                                                 cs.lookup_core_segments(&cs.isd_as, &dcs.isd_as)
                                                     .into_iter()
-                                                    .take(MAX_SEGMENTS - core_segments.len())
+                                                    .take(remaining),
                                             );
-                                            if core_segments.len() >= MAX_SEGMENTS {
-                                                break;
-                                            }
                                         }
                                     }
                                 }
                             }
-                            if core_segments.len() >= MAX_SEGMENTS {
+                            if core_segments.len() >= segment_cap {
                                 break;
                             }
                         }
@@ -794,23 +988,26 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 }
             }
 
-            // Collect down segments to destination
+            // Collect down segments to the destination from the destination ISD's core ASes.
             if !dst_cs.is_core {
-                for router_id in self.routers.keys() {
-                    if let Ok(r) = self.get_router(*router_id) {
-                        if let Some(cs) = r.scion() {
-                            // Check all ASes in destination ISD (not just cores)
-                            // In hierarchical topologies, down-segments may be stored at transits
-                            if cs.isd_as.isd == dst_isd_as.isd {
-                                down_segments.extend(
-                                    cs.lookup_down_segments_to(&dst_isd_as)
-                                        .into_iter()
-                                        .take(MAX_SEGMENTS - down_segments.len())
-                                );
-                                if down_segments.len() >= MAX_SEGMENTS {
-                                    break;
-                                }
-                            }
+                for (core_isd_as, core_as) in self
+                    .scion_ases
+                    .iter()
+                    .filter(|(id, sc)| sc.is_core && id.isd == dst_isd_as.isd)
+                {
+                    let remaining = segment_cap.saturating_sub(down_segments.len());
+                    if remaining == 0 {
+                        break;
+                    }
+
+                    let segments = core_as.control_service.lookup_down_segments_to(&dst_isd_as);
+
+                    for seg in segments.into_iter().take(remaining) {
+                        if seg.source() == Some(*core_isd_as) {
+                            down_segments.push(seg);
+                        }
+                        if down_segments.len() >= segment_cap {
+                            break;
                         }
                     }
                 }
@@ -832,32 +1029,34 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// returns all possible forwarding paths by combining all available up-segments with
     /// all available down-segments, plus all peering shortcuts.
     ///
+    /// Lookup paths between two ASes in the same ISD.
+    ///
+    /// **SPEC-COMPLIANT:** Path lookup between ASes (ISD-AS), not routers.
+    ///
     /// # Arguments
-    /// * `src` - Source router
-    /// * `dst` - Destination router
+    /// * `src` - Source AS (ISD-AS identifier)
+    /// * `dst` - Destination AS (ISD-AS identifier)
     ///
     /// # Returns
     /// `Ok(Vec<ForwardingPath>)` - Vector of all available paths within the ISD
     pub fn scion_lookup_intra_isd_paths(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
         use crate::scion::ForwardingPath;
 
         // Spec-compliant limits (draft-dekater-scion-controlplane-10, line 1558)
-        const MAX_UP_SEGMENTS: usize = 50;
-        const MAX_DOWN_SEGMENTS: usize = 50;
-        const MAX_PATHS_RETURN: usize = 1000;
 
-        let src_router = self.get_router(src)?;
-        let dst_router = self.get_router(dst)?;
+        let src_isd_as = src;
+        let dst_isd_as = dst;
 
-        let src_cs = src_router.scion().ok_or(NetworkError::DeviceNotFound(src))?;
-        let dst_cs = dst_router.scion().ok_or(NetworkError::DeviceNotFound(dst))?;
+        // Get AS-level control services (unwrap is safe if topology is properly constructed)
+        let src_scion_as = self.scion_ases.get(&src_isd_as).unwrap();
+        let dst_scion_as = self.scion_ases.get(&dst_isd_as).unwrap();
 
-        let src_isd_as = src_cs.isd_as;
-        let dst_isd_as = dst_cs.isd_as;
+        let src_is_core = src_scion_as.is_core;
+        let dst_is_core = dst_scion_as.is_core;
 
         // Check if same ISD
         if src_isd_as.isd != dst_isd_as.isd {
@@ -866,9 +1065,11 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
         let mut paths = Vec::new();
 
-        // If both are core ASes in same ISD, look for core segments
-        if src_cs.is_core && dst_cs.is_core {
-            let core_segments = src_cs.lookup_core_segments(&src_isd_as, &dst_isd_as);
+        // If both are core ASes in same ISD, look for core segments at AS level
+        if src_is_core && dst_is_core {
+            let core_segments = src_scion_as
+                .control_service
+                .lookup_core_segments(&src_isd_as, &dst_isd_as);
             for core_seg in core_segments {
                 if let Ok(path) = ForwardingPath::new(None, Some(core_seg), None) {
                     paths.push(path);
@@ -878,90 +1079,93 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         }
 
         // Find core ASes that can serve as intermediaries
-        // Get all routers to find core ASes in this ISD
-        let core_routers: Vec<RouterId> = self.routers
+        // PERFORMANCE: Iterate over scion_ases instead of all routers (O(ASes) not O(routers))
+        let core_ases: Vec<crate::scion::IsdAs> = self
+            .scion_ases
             .iter()
-            .filter_map(|(id, r)| {
-                if let Some(cs) = r.scion() {
-                    if cs.is_core && cs.isd_as.isd == src_isd_as.isd {
-                        return Some(*id);
-                    }
+            .filter_map(|(isd_as, scion_as)| {
+                if scion_as.is_core && isd_as.isd == src_isd_as.isd {
+                    Some(*isd_as)
+                } else {
+                    None
                 }
-                None
             })
             .collect();
 
+        let path_limit = self.scion_mode.max_path_results();
+        let up_limit = self.scion_mode.up_down_segment_limit();
+        let down_limit = self.scion_mode.up_down_segment_limit();
+
         // For each core AS, try to construct a path
-        for core_router in core_routers {
+        for core_isd_as in core_ases {
             // Early exit if we've reached the path limit
-            if paths.len() >= MAX_PATHS_RETURN {
+            if paths.len() >= path_limit {
                 break;
             }
 
-            let core = self.get_router(core_router)?;
-            let core_cs = core.scion().unwrap();
-            let core_isd_as = core_cs.isd_as;
-
-            // Get up-segment from src to core
-            let up_segments: Vec<_> = if src_cs.is_core {
-                vec![] // Source is already core, no up-segment needed
+            // Get up-segment from src to core (reading from the source AS path database)
+            let up_segments: Vec<_> = if src_is_core {
+                vec![]
             } else {
-                // Look for up-segments TO this core FROM the source
-                core_cs.lookup_up_segments(&core_isd_as)
+                src_scion_as
+                    .control_service
+                    .lookup_up_segments(&core_isd_as)
                     .into_iter()
-                    .filter(|seg| seg.source() == Some(src_isd_as))
-                    .take(MAX_UP_SEGMENTS)
-                    .map(|seg| seg.clone())
+                    .take(up_limit)
                     .collect()
             };
 
-            // Get down-segment from core to dst
-            let down_segments: Vec<_> = if dst_cs.is_core {
-                vec![] // Destination is core, no down-segment needed
-            } else {
-                // Look for down-segments TO the destination FROM this core
-                // Use wrapper method which limits before cloning
-                core_cs.lookup_down_segments_to(&dst_isd_as)
+            // Get down-segment from core to dst (reading from the destination AS path database)
+            let down_segments: Vec<_> = if dst_is_core {
+                vec![]
+            } else if let Some(core_as_entry) = self.scion_ases.get(&core_isd_as) {
+                core_as_entry
+                    .control_service
+                    .lookup_down_segments_to(&dst_isd_as)
                     .into_iter()
                     .filter(|seg| seg.source() == Some(core_isd_as))
-                    .take(MAX_DOWN_SEGMENTS)
+                    .take(down_limit)
                     .collect()
+            } else {
+                vec![]
             };
 
             // Combine segments
-            if src_cs.is_core && !dst_cs.is_core {
+            if src_is_core && !dst_is_core {
                 // Core to non-core: only down-segment
                 for down_seg in &down_segments {
                     if let Ok(path) = ForwardingPath::new(None, None, Some(down_seg.clone())) {
                         paths.push(path);
                     }
                 }
-            } else if !src_cs.is_core && dst_cs.is_core {
+            } else if !src_is_core && dst_is_core {
                 // Non-core to core: only up-segment
                 for up_seg in &up_segments {
                     if let Ok(path) = ForwardingPath::new(Some(up_seg.clone()), None, None) {
                         paths.push(path);
                     }
                 }
-            } else if !src_cs.is_core && !dst_cs.is_core {
+            } else if !src_is_core && !dst_is_core {
                 // Non-core to non-core: up + down
                 for up_seg in &up_segments {
-                    if paths.len() >= MAX_PATHS_RETURN {
+                    if paths.len() >= path_limit {
                         break;
                     }
                     for down_seg in &down_segments {
-                        if paths.len() >= MAX_PATHS_RETURN {
+                        if paths.len() >= path_limit {
                             break;
                         }
                         // Try regular path (through core)
-                        if let Ok(path) = ForwardingPath::new(Some(up_seg.clone()), None, Some(down_seg.clone())) {
+                        if let Ok(path) =
+                            ForwardingPath::new(Some(up_seg.clone()), None, Some(down_seg.clone()))
+                        {
                             paths.push(path);
                         }
 
                         // Try peering shortcut paths
                         let shortcuts = up_seg.find_peering_shortcuts(down_seg);
                         for (pos1, pos2, peering) in shortcuts {
-                            if paths.len() >= MAX_PATHS_RETURN {
+                            if paths.len() >= path_limit {
                                 break;
                             }
                             if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1005,26 +1209,18 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         dst_core: RouterId,
         max_paths: usize,
     ) -> Result<Vec<Vec<crate::scion::PathSegment<P>>>, NetworkError> {
-        use std::collections::{VecDeque, HashSet, HashMap};
+        use std::collections::{HashSet, VecDeque};
 
-        let src_core_router = self.get_router(src_core)?;
-        let dst_core_router = self.get_router(dst_core)?;
-
-        let src_core_cs = src_core_router.scion().ok_or(NetworkError::DeviceNotFound(src_core))?;
-        let dst_core_cs = dst_core_router.scion().ok_or(NetworkError::DeviceNotFound(dst_core))?;
-
-        let src_isd_as = src_core_cs.isd_as;
-        let dst_isd_as = dst_core_cs.isd_as;
-
-        // **OPTIMIZATION**: Pre-build a map of ISD-AS -> RouterId for O(1) lookups
-        let mut isd_as_to_router: HashMap<crate::scion::IsdAs, RouterId> = HashMap::new();
-        for (router_id, router) in &self.routers {
-            if let Some(cs) = router.scion() {
-                if cs.is_core {
-                    isd_as_to_router.insert(cs.isd_as, *router_id);
-                }
-            }
-        }
+        let src_isd_as = self
+            .get_router(src_core)?
+            .scion()
+            .ok_or(NetworkError::DeviceNotFound(src_core))?
+            .isd_as;
+        let dst_isd_as = self
+            .get_router(dst_core)?
+            .scion()
+            .ok_or(NetworkError::DeviceNotFound(dst_core))?
+            .isd_as;
 
         // BFS to find all paths from src_core to dst_core
         let mut queue = VecDeque::new();
@@ -1061,25 +1257,26 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 continue;
             }
 
-            // **OPTIMIZATION**: O(1) lookup instead of O(n) iteration
-            if let Some(&current_router_id) = isd_as_to_router.get(&current_isd_as) {
-                let current_cs = self.get_router(current_router_id)?.scion().unwrap();
+            if let Some(scion_as) = self.scion_ases.get(&current_isd_as) {
+                if scion_as.is_core {
+                    let all_core_segs = scion_as
+                        .control_service
+                        .path_database
+                        .get_all_core_segments();
 
-                // Get all core segments from this AS
-                let all_core_segs = current_cs.path_database.get_all_core_segments();
+                    for seg in all_core_segs {
+                        if let Some(next_isd_as) = seg.destination() {
+                            if next_isd_as != current_isd_as
+                                && !visited_in_this_path.contains(&next_isd_as)
+                            {
+                                let mut new_path = path_so_far.clone();
+                                new_path.push(seg.clone());
 
-                for seg in all_core_segs {
-                    if let Some(next_isd_as) = seg.destination() {
-                        // Only follow segments that make progress (different from current)
-                        if next_isd_as != current_isd_as && !visited_in_this_path.contains(&next_isd_as) {
-                            let mut new_path = path_so_far.clone();
-                            new_path.push(seg.clone());
+                                let mut new_visited = visited_in_this_path.clone();
+                                new_visited.insert(current_isd_as);
 
-                            // Create new visited set for this branch
-                            let mut new_visited = visited_in_this_path.clone();
-                            new_visited.insert(current_isd_as);
-
-                            queue.push_back((next_isd_as, new_path, new_visited));
+                                queue.push_back((next_isd_as, new_path, new_visited));
+                            }
                         }
                     }
                 }
@@ -1110,16 +1307,29 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// Each core chain is combined with ALL available up-segments and down-segments,
     /// so the total number of paths can still be quite large. Use
     /// `scion_lookup_inter_isd_paths_limited` to customize this limit.
+    /// **SPEC-COMPLIANT:** Lookup paths between ASes in different ISDs.
+    ///
+    /// Per draft-dekater-scion-controlplane-10, Section 5.2:
+    /// "Endhosts query the control service for available paths"
+    ///
+    /// # Arguments
+    /// * `src` - Source AS (ISD-AS)
+    /// * `dst` - Destination AS (ISD-AS)
+    ///
+    /// # Returns
+    /// Vector of all available forwarding paths between the two ASes
     pub fn scion_lookup_inter_isd_paths(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
         // Default: limit to 100 core path chains for performance
         self.scion_lookup_inter_isd_paths_limited(src, dst, 100)
     }
 
     /// Lookup paths from source to destination (inter-ISD) with configurable limit.
+    ///
+    /// **SPEC-COMPLIANT:** Paths are looked up between ASes (not routers).
     ///
     /// Like `scion_lookup_inter_isd_paths` but allows customizing the maximum number
     /// of core path chains to explore.
@@ -1128,8 +1338,8 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// returns all possible forwarding paths by combining all available segments.
     ///
     /// # Arguments
-    /// * `src` - Source router
-    /// * `dst` - Destination router
+    /// * `src` - Source AS (ISD-AS)
+    /// * `dst` - Destination AS (ISD-AS)
     /// * `max_core_chains` - Maximum number of core path chains to explore (0 = unlimited)
     ///
     /// # Returns
@@ -1143,39 +1353,43 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     ///
     /// # Example
     /// ```ignore
+    /// use bgpsim::scion::IsdAs;
+    ///
     /// // Get all paths with default limit (100 core chains)
-    /// let paths = net.scion_lookup_inter_isd_paths(src, dst)?;
+    /// let paths = net.scion_lookup_inter_isd_paths(
+    ///     IsdAs::new(1, 110),
+    ///     IsdAs::new(2, 120)
+    /// )?;
     ///
     /// // Get all paths with no limit (exhaustive search)
-    /// let all_paths = net.scion_lookup_inter_isd_paths_limited(src, dst, 0)?;
+    /// let all_paths = net.scion_lookup_inter_isd_paths_limited(
+    ///     IsdAs::new(1, 110),
+    ///     IsdAs::new(2, 120),
+    ///     0
+    /// )?;
     ///
     /// // Get paths with stricter limit (faster)
-    /// let fewer_paths = net.scion_lookup_inter_isd_paths_limited(src, dst, 10)?;
+    /// let fewer_paths = net.scion_lookup_inter_isd_paths_limited(
+    ///     IsdAs::new(1, 110),
+    ///     IsdAs::new(2, 120),
+    ///     10
+    /// )?;
     /// ```
     pub fn scion_lookup_inter_isd_paths_limited(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
         max_core_chains: usize,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
         use crate::scion::ForwardingPath;
 
-        // Spec-compliant limits (draft-dekater-scion-controlplane-10, line 1558):
-        // "A parent AS propagates (at most) the best PCBs to each of its child ASes.
-        //  This number SHOULD be limited to at most 50..."
-        // We apply similar limits here to prevent combinatorial explosion.
-        const MAX_UP_SEGMENTS: usize = 50;
-        const MAX_DOWN_SEGMENTS: usize = 50;
-        const MAX_PATHS_RETURN: usize = 1000;
+        // Spec-compliant limits (draft-dekater-scion-controlplane-10, line 1558) with configurable caps.
+        let max_up_segments = self.scion_mode.up_down_segment_limit();
+        let max_down_segments = self.scion_mode.up_down_segment_limit();
+        let max_paths_return = self.scion_mode.max_path_results();
 
-        let src_router = self.get_router(src)?;
-        let dst_router = self.get_router(dst)?;
-
-        let src_cs = src_router.scion().ok_or(NetworkError::DeviceNotFound(src))?;
-        let dst_cs = dst_router.scion().ok_or(NetworkError::DeviceNotFound(dst))?;
-
-        let src_isd_as = src_cs.isd_as;
-        let dst_isd_as = dst_cs.isd_as;
+        let src_isd_as = src;
+        let dst_isd_as = dst;
 
         // Check if different ISDs
         if src_isd_as.isd == dst_isd_as.isd {
@@ -1184,110 +1398,127 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
         let mut paths = Vec::new();
 
-        // Find core ASes in source and destination ISDs
-        let src_cores: Vec<RouterId> = self.routers
+        // Find core ASes in source and destination ISDs (AS-level iteration!)
+        let src_cores: Vec<IsdAs> = self
+            .scion_ases
             .iter()
-            .filter_map(|(id, r)| {
-                if let Some(cs) = r.scion() {
-                    if cs.is_core && cs.isd_as.isd == src_isd_as.isd {
-                        return Some(*id);
-                    }
+            .filter_map(|(isd_as, scion_as)| {
+                if scion_as.is_core && isd_as.isd == src_isd_as.isd {
+                    Some(*isd_as)
+                } else {
+                    None
                 }
-                None
             })
             .collect();
 
-        let dst_cores: Vec<RouterId> = self.routers
+        let dst_cores: Vec<IsdAs> = self
+            .scion_ases
             .iter()
-            .filter_map(|(id, r)| {
-                if let Some(cs) = r.scion() {
-                    if cs.is_core && cs.isd_as.isd == dst_isd_as.isd {
-                        return Some(*id);
-                    }
+            .filter_map(|(isd_as, scion_as)| {
+                if scion_as.is_core && isd_as.isd == dst_isd_as.isd {
+                    Some(*isd_as)
+                } else {
+                    None
                 }
-                None
             })
             .collect();
 
         // For each pair of core ASes, try to construct a path
-        for src_core_router in &src_cores {
+        for src_core_as in &src_cores {
             // Early exit if we've found enough paths
-            if paths.len() >= MAX_PATHS_RETURN {
+            if paths.len() >= max_paths_return {
                 break;
             }
 
-            for dst_core_router in &dst_cores {
+            for dst_core_as in &dst_cores {
                 // Early exit if we've found enough paths
-                if paths.len() >= MAX_PATHS_RETURN {
+                if paths.len() >= max_paths_return {
                     break;
                 }
 
-                let src_core = self.get_router(*src_core_router)?;
-                let dst_core = self.get_router(*dst_core_router)?;
-
-                let src_core_cs = src_core.scion().unwrap();
-                let dst_core_cs = dst_core.scion().unwrap();
-
-                let _src_core_isd_as = src_core_cs.isd_as;
-                let _dst_core_isd_as = dst_core_cs.isd_as;
+                // Get AS-level control services
+                let src_core_scion_as = self.scion_ases.get(src_core_as).unwrap();
+                let dst_core_scion_as = self.scion_ases.get(dst_core_as).unwrap();
+                let src_scion_as = self.scion_ases.get(&src_isd_as).unwrap();
+                let dst_scion_as = self.scion_ases.get(&dst_isd_as).unwrap();
 
                 // Get up-segment from src to src_core (limit to prevent explosion)
-                let up_segments: Vec<_> = if src_cs.is_core {
+                let up_segments: Vec<_> = if src_scion_as.is_core {
                     vec![]
                 } else {
-                    src_core_cs.lookup_up_segments_from(&src_isd_as)
+                    src_scion_as
+                        .control_service
+                        .lookup_up_segments(src_core_as)
                         .into_iter()
-                        .take(MAX_UP_SEGMENTS)
+                        .take(max_up_segments)
                         .collect()
                 };
 
                 // Find multi-hop core paths (including direct paths)
-                let limit = if max_core_chains == 0 { usize::MAX } else { max_core_chains };
-                let core_path_chains = self.find_multi_hop_core_paths(*src_core_router, *dst_core_router, limit)?;
+                // TODO: Refactor find_multi_hop_core_paths to use IsdAs instead of RouterId
+                let limit = if max_core_chains == 0 {
+                    usize::MAX
+                } else {
+                    max_core_chains
+                };
+
+                // Get representative routers for this pair of core ASes
+                let src_core_router = src_core_scion_as.border_routers_iter().next().unwrap();
+                let dst_core_router = dst_core_scion_as.border_routers_iter().next().unwrap();
+                let core_path_chains =
+                    self.find_multi_hop_core_paths(*src_core_router, *dst_core_router, limit)?;
 
                 // Get down-segment from dst_core to dst (limit to prevent explosion)
-                let down_segments: Vec<_> = if dst_cs.is_core {
+                let down_segments: Vec<_> = if dst_scion_as.is_core {
                     vec![]
                 } else {
-                    dst_core_cs.lookup_down_segments_to(&dst_isd_as)
+                    dst_core_scion_as
+                        .control_service
+                        .lookup_down_segments_to(&dst_isd_as)
                         .into_iter()
-                        .take(MAX_DOWN_SEGMENTS)
+                        .filter(|seg| seg.source() == Some(*dst_core_as))
+                        .take(max_down_segments)
                         .collect()
                 };
 
                 // Process each core path chain
                 for core_chain in &core_path_chains {
                     // Early exit if we've found enough paths
-                    if paths.len() >= MAX_PATHS_RETURN {
+                    if paths.len() >= max_paths_return {
                         break;
                     }
 
                     // Chain the core segments together
-                    let core_seg = match crate::scion::PathSegment::chain_core_segments(core_chain.clone()) {
-                        Some(seg) => seg,
-                        None => continue, // Skip invalid chains
-                    };
-                    if src_cs.is_core && dst_cs.is_core {
+                    let core_seg =
+                        match crate::scion::PathSegment::chain_core_segments(core_chain.clone()) {
+                            Some(seg) => seg,
+                            None => continue, // Skip invalid chains
+                        };
+                    if src_scion_as.is_core && dst_scion_as.is_core {
                         // Core to core across ISDs: only core-segment
                         if let Ok(path) = ForwardingPath::new(None, Some(core_seg.clone()), None) {
                             paths.push(path);
-                            if paths.len() >= MAX_PATHS_RETURN {
+                            if paths.len() >= max_paths_return {
                                 break;
                             }
                         }
-                    } else if src_cs.is_core && !dst_cs.is_core {
+                    } else if src_scion_as.is_core && !dst_scion_as.is_core {
                         // Core to non-core across ISDs: core + down
                         for down_seg in &down_segments {
-                            if paths.len() >= MAX_PATHS_RETURN {
+                            if paths.len() >= max_paths_return {
                                 break;
                             }
-                            if let Ok(path) = ForwardingPath::new(None, Some(core_seg.clone()), Some(down_seg.clone())) {
+                            if let Ok(path) = ForwardingPath::new(
+                                None,
+                                Some(core_seg.clone()),
+                                Some(down_seg.clone()),
+                            ) {
                                 paths.push(path);
                             }
                             // Check for peering shortcuts between core and down
                             let shortcuts = core_seg.find_peering_shortcuts(down_seg);
                             for (pos1, pos2, peering) in shortcuts {
-                                if paths.len() >= MAX_PATHS_RETURN {
+                                if paths.len() >= max_paths_return {
                                     break;
                                 }
                                 if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1301,19 +1532,23 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                                 }
                             }
                         }
-                    } else if !src_cs.is_core && dst_cs.is_core {
+                    } else if !src_scion_as.is_core && dst_scion_as.is_core {
                         // Non-core to core across ISDs: up + core
                         for up_seg in &up_segments {
-                            if paths.len() >= MAX_PATHS_RETURN {
+                            if paths.len() >= max_paths_return {
                                 break;
                             }
-                            if let Ok(path) = ForwardingPath::new(Some(up_seg.clone()), Some(core_seg.clone()), None) {
+                            if let Ok(path) = ForwardingPath::new(
+                                Some(up_seg.clone()),
+                                Some(core_seg.clone()),
+                                None,
+                            ) {
                                 paths.push(path);
                             }
                             // Check for peering shortcuts between up and core
                             let shortcuts = up_seg.find_peering_shortcuts(&core_seg);
                             for (pos1, pos2, peering) in shortcuts {
-                                if paths.len() >= MAX_PATHS_RETURN {
+                                if paths.len() >= max_paths_return {
                                     break;
                                 }
                                 if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1330,22 +1565,26 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                     } else {
                         // Non-core to non-core across ISDs: up + core + down
                         for up_seg in &up_segments {
-                            if paths.len() >= MAX_PATHS_RETURN {
+                            if paths.len() >= max_paths_return {
                                 break;
                             }
                             for down_seg in &down_segments {
-                                if paths.len() >= MAX_PATHS_RETURN {
+                                if paths.len() >= max_paths_return {
                                     break;
                                 }
                                 // Regular 3-segment path
-                                if let Ok(path) = ForwardingPath::new(Some(up_seg.clone()), Some(core_seg.clone()), Some(down_seg.clone())) {
+                                if let Ok(path) = ForwardingPath::new(
+                                    Some(up_seg.clone()),
+                                    Some(core_seg.clone()),
+                                    Some(down_seg.clone()),
+                                ) {
                                     paths.push(path);
                                 }
 
                                 // Peering shortcut between up and core
                                 let shortcuts_up_core = up_seg.find_peering_shortcuts(&core_seg);
                                 for (pos1, pos2, peering) in shortcuts_up_core {
-                                    if paths.len() >= MAX_PATHS_RETURN {
+                                    if paths.len() >= max_paths_return {
                                         break;
                                     }
                                     if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1362,7 +1601,7 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                                 // Peering shortcut between core and down
                                 let shortcuts_core_down = core_seg.find_peering_shortcuts(down_seg);
                                 for (pos1, pos2, peering) in shortcuts_core_down {
-                                    if paths.len() >= MAX_PATHS_RETURN {
+                                    if paths.len() >= max_paths_return {
                                         break;
                                     }
                                     if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1379,7 +1618,7 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
                                 // Peering shortcut between up and down
                                 let shortcuts_up_down = up_seg.find_peering_shortcuts(down_seg);
                                 for (pos1, pos2, peering) in shortcuts_up_down {
-                                    if paths.len() >= MAX_PATHS_RETURN {
+                                    if paths.len() >= max_paths_return {
                                         break;
                                     }
                                     if let Ok(shortcut_path) = ForwardingPath::new_with_peering(
@@ -1420,22 +1659,27 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     /// # Performance Note
     /// For inter-ISD lookups in large topologies, the number of core path chains is
     /// limited to 100 by default. Use `scion_lookup_inter_isd_paths_limited` to customize.
+    /// **SPEC-COMPLIANT:** Lookup paths between two ASes (not routers).
+    ///
+    /// Per draft-dekater-scion-controlplane-10, Section 5.2:
+    /// "Endhosts query the control service for available paths"
+    ///
+    /// This correctly implements AS-level path lookup - paths are between
+    /// SCION ASes (ISD-AS identifiers), not between individual routers.
+    ///
+    /// # Arguments
+    /// * `src` - Source AS (ISD-AS identifier)
+    /// * `dst` - Destination AS (ISD-AS identifier)
+    ///
+    /// # Returns
+    /// Vector of all available forwarding paths between the two ASes
     pub fn scion_lookup_paths(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
-        let src_router = self.get_router(src)?;
-        let dst_router = self.get_router(dst)?;
-
-        let src_cs = src_router.scion().ok_or(NetworkError::DeviceNotFound(src))?;
-        let dst_cs = dst_router.scion().ok_or(NetworkError::DeviceNotFound(dst))?;
-
-        let src_isd_as = src_cs.isd_as;
-        let dst_isd_as = dst_cs.isd_as;
-
         // Determine if intra-ISD or inter-ISD
-        if src_isd_as.isd == dst_isd_as.isd {
+        if src.isd == dst.isd {
             self.scion_lookup_intra_isd_paths(src, dst)
         } else {
             self.scion_lookup_inter_isd_paths(src, dst)
@@ -1444,12 +1688,14 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
     /// Lookup paths with selection policy.
     ///
-    /// This method finds all available paths between source and destination,
+    /// **SPEC-COMPLIANT:** Paths are looked up between ASes (not routers).
+    ///
+    /// This method finds all available paths between source and destination ASes,
     /// then applies the provided selection policy to choose the best paths.
     ///
     /// # Arguments
-    /// * `src` - Source router ID
-    /// * `dst` - Destination router ID
+    /// * `src` - Source AS (ISD-AS)
+    /// * `dst` - Destination AS (ISD-AS)
     /// * `policy` - Path selection policy to apply
     /// * `max_count` - Maximum number of paths to return
     ///
@@ -1458,15 +1704,20 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
     ///
     /// # Example
     /// ```ignore
-    /// use bgpsim::scion::{ShortestPathPolicy, PathSelectionPolicy};
+    /// use bgpsim::scion::{ShortestPathPolicy, PathSelectionPolicy, IsdAs};
     ///
     /// let policy = ShortestPathPolicy;
-    /// let paths = net.scion_lookup_paths_with_selection(src, dst, &policy, 3)?;
+    /// let paths = net.scion_lookup_paths_with_selection(
+    ///     IsdAs::new(1, 110),
+    ///     IsdAs::new(1, 111),
+    ///     &policy,
+    ///     3
+    /// )?;
     /// ```
     pub fn scion_lookup_paths_with_selection(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
         policy: &dyn crate::scion::PathSelectionPolicy<P>,
         max_count: usize,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
@@ -1490,12 +1741,14 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
     /// Lookup intra-ISD paths with selection policy.
     ///
+    /// **SPEC-COMPLIANT:** Paths are looked up between ASes (not routers).
+    ///
     /// Like `scion_lookup_intra_isd_paths` but applies a selection policy
     /// to choose the best paths.
     pub fn scion_lookup_intra_isd_paths_with_selection(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
         policy: &dyn crate::scion::PathSelectionPolicy<P>,
         max_count: usize,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
@@ -1586,12 +1839,14 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
     /// Lookup inter-ISD paths with selection policy.
     ///
+    /// **SPEC-COMPLIANT:** Paths are looked up between ASes (not routers).
+    ///
     /// Like `scion_lookup_inter_isd_paths` but applies a selection policy
     /// to choose the best paths.
     pub fn scion_lookup_inter_isd_paths_with_selection(
         &self,
-        src: RouterId,
-        dst: RouterId,
+        src: IsdAs,
+        dst: IsdAs,
         policy: &dyn crate::scion::PathSelectionPolicy<P>,
         max_count: usize,
     ) -> Result<Vec<crate::scion::ForwardingPath<P>>, NetworkError> {
@@ -1676,6 +1931,178 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         Ok(core_ases.len())
     }
 
+    /// Sync SCION event data to AS-level storage (spec-compliant).
+    ///
+    /// This ensures PCBs from event-driven beaconing are stored at the AS level
+    /// where path lookup expects to find them. The SCION spec states "An AS stores
+    /// path segments", not individual routers.
+    ///
+    /// # Event-Driven Beaconing Problem
+    ///
+    /// Event-driven beaconing naturally stores PCBs at router level because:
+    /// - Events are dispatched to routers (not ASes)
+    /// - Router's `handle_event()` stores in `self.beacon_store` (router-level)
+    /// - No access to Network's `scion_ases` map from event handler
+    ///
+    /// This function bridges the gap by syncing PCBs to AS-level storage after
+    /// the router processes the event.
+    ///
+    /// # Arguments
+    /// * `event` - The SCION event that was processed
+    /// * `router_id` - The router that processed the event
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err(NetworkError)` if router not found
+    fn sync_scion_event_to_as_level<T: Default>(
+        &mut self,
+        event: &crate::scion::ScionEvent<P>,
+        router_id: RouterId,
+    ) -> Result<Vec<Event<P, T>>, NetworkError> {
+        use crate::scion::beaconing::{add_peering_entries, extend_pcb};
+        use crate::scion::ScionEvent;
+
+        let mut new_events = Vec::new();
+
+        match event {
+            ScionEvent::BeaconPropagation { pcb, src, .. } => {
+                // Get the ISD-AS of the destination router
+                let router = self.get_router(router_id)?;
+                if let Some(scion_cs) = router.scion() {
+                    let isd_as = scion_cs.isd_as;
+                    let ingress_iface = scion_cs.get_interface(*src).cloned();
+                    let ingress_if = ingress_iface
+                        .as_ref()
+                        .map(|iface| iface.interface_id)
+                        .unwrap_or(InterfaceId::UNSPECIFIED);
+                    let ingress_mtu = ingress_iface
+                        .as_ref()
+                        .map(|iface| iface.mtu)
+                        .unwrap_or(1500);
+
+                    if self.scion_ases.contains_key(&isd_as) {
+                        // Store PCB at AS level (spec-compliant) and capture metadata
+                        let border_router_ids =
+                            if let Some(as_entry) = self.scion_ases.get_mut(&isd_as) {
+                                if !as_entry.control_service.beacon_store.insert(pcb.clone()) {
+                                    return Ok(new_events);
+                                }
+                                as_entry.border_routers_iter().copied().collect()
+                            } else {
+                                Vec::new()
+                            };
+
+                        // Re-acquire immutable reference for neighbor classification
+                        let scion_as = self.scion_ases.get(&isd_as).unwrap();
+                        let mut targets: Vec<(
+                            RouterId,
+                            InterfaceInfo,
+                            Vec<(IsdAs, InterfaceId, InterfaceId, u16)>,
+                        )> = Vec::new();
+
+                        for border_router in border_router_ids {
+                            if border_router == router_id {
+                                continue; // already handled by this router
+                            }
+
+                            if let Some(br_router) = self.routers.get(&border_router) {
+                                if let Some(br_cs) = br_router.scion() {
+                                    let peering_entries: Vec<(
+                                        IsdAs,
+                                        InterfaceId,
+                                        InterfaceId,
+                                        u16,
+                                    )> = br_cs
+                                        .get_peering_interfaces()
+                                        .iter()
+                                        .map(|iface| {
+                                            (
+                                                iface.neighbor_isd_as,
+                                                iface.interface_id,
+                                                iface.interface_id,
+                                                iface.mtu,
+                                            )
+                                        })
+                                        .collect();
+
+                                    // Parent/child propagation
+                                    for iface in br_cs.get_child_interfaces() {
+                                        let neighbor_as = iface.neighbor_isd_as;
+                                        let neighbor_info = self.scion_ases.get(&neighbor_as);
+
+                                        let is_child = if scion_as.is_core {
+                                            neighbor_info.map(|info| !info.is_core).unwrap_or(false)
+                                        } else if neighbor_as.isd == isd_as.isd {
+                                            neighbor_info.map(|info| !info.is_core).unwrap_or(false)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_child {
+                                            targets.push((
+                                                border_router,
+                                                iface.clone(),
+                                                peering_entries.clone(),
+                                            ));
+                                        }
+                                    }
+
+                                    // Core propagation (core↔core)
+                                    if scion_as.is_core {
+                                        for iface in br_cs.get_core_interfaces() {
+                                            targets.push((
+                                                border_router,
+                                                iface.clone(),
+                                                peering_entries.clone(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        for (src_router, iface, peering_entries) in targets {
+                            let mut extended_pcb = extend_pcb(
+                                pcb.clone(),
+                                isd_as,
+                                ingress_if,
+                                iface.interface_id,
+                                ingress_mtu,
+                                pcb.segment_info.timestamp,
+                            );
+
+                            if !peering_entries.is_empty() {
+                                extended_pcb = add_peering_entries(
+                                    extended_pcb,
+                                    peering_entries.clone(),
+                                    pcb.segment_info.timestamp,
+                                );
+                            }
+
+                            new_events.push(Event::scion(
+                                T::default(),
+                                src_router,
+                                iface.neighbor_router,
+                                ScionEvent::BeaconPropagation {
+                                    src: src_router,
+                                    dst: iface.neighbor_router,
+                                    pcb: extended_pcb,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Other event types don't need AS-level syncing yet.
+            // CoreBeaconTrigger and IntraIsdBeaconTrigger are handled by the
+            // router which generates BeaconPropagation events.
+            // SegmentRegistration events register directly at AS level.
+            _ => {}
+        }
+
+        Ok(new_events)
+    }
+
     /// Run event queue until SCION beaconing converges (or event limit reached).
     ///
     /// This function processes events from the queue until either:
@@ -1711,9 +2138,33 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
         Q: crate::event::EventQueue<P, Priority = T>,
     {
         let mut events_processed = 0;
-        const MAX_EVENTS: usize = 1_000_000; // Safety limit to prevent infinite loops
+        self.apply_core_propagation_limit();
+        const MAX_EVENTS: usize = 10_000_0000; // Safety limit to prevent infinite loops (increased for large topologies)
 
         loop {
+            if events_processed % (MAX_EVENTS/10) == 0 && events_processed > 0 {
+                log::info!(
+                    "[scion_converge] processed={} queue_len={} next_is_scion={}",
+                    events_processed,
+                    self.queue.len(),
+                    self.queue
+                        .peek()
+                        .map(|e| e.is_scion_event())
+                        .unwrap_or(false)
+                );
+                // if events_processed % (MAX_EVENTS/10) == 0 {
+                //     if let Some(event) = self.queue.peek() {
+                //         if let Event::Scion { src, dst, e, .. } = event {
+                //             log::info!(
+                //                 "[scion_converge] next event src={:?} dst={:?} kind={:?}",
+                //                 src,
+                //                 dst,
+                //                 e
+                //             );
+                //         }
+                //     }
+                // }
+            }
             // Check if we've exceeded the safety limit
             if events_processed >= MAX_EVENTS {
                 return Err(NetworkError::NoConvergence);
@@ -1734,15 +2185,33 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             if let Some(event) = self.queue.pop() {
                 let router_id = event.router();
 
-                // Execute the event
+                // Extract SCION event data before processing (for AS-level sync)
+                let scion_event = if let crate::event::Event::Scion { e, .. } = &event {
+                    Some(e.clone())
+                } else {
+                    None
+                };
+
+                // Execute the event at router level
                 let router = self
                     .routers
                     .get_mut(&router_id)
                     .ok_or(NetworkError::DeviceNotFound(router_id))?;
                 let (_update, new_events) = router.handle_event(event)?;
 
-                // Enqueue new events generated by this event
+                // Sync SCION event data to AS-level storage (spec-compliant)
+                // This also generates intra-ISD propagation events
+                let sync_events = if let Some(scion_event) = scion_event {
+                    self.sync_scion_event_to_as_level::<T>(&scion_event, router_id)?
+                } else {
+                    Vec::new()
+                };
+
+                // Enqueue new events generated by router-level event handling
                 self.enqueue_events(new_events);
+
+                // Enqueue new events generated by AS-level sync (intra-ISD propagation)
+                self.enqueue_events(sync_events);
 
                 events_processed += 1;
             } else {
@@ -1758,9 +2227,9 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SimplePrefix;
     use crate::event::BasicEventQueue;
     use crate::ospf::GlobalOspf;
+    use crate::types::SimplePrefix;
 
     #[test]
     fn test_enable_scion() {
@@ -1785,7 +2254,9 @@ mod tests {
         net.enable_scion(r2, IsdAs::new(1, 120u64), true).unwrap();
 
         // Configure SCION link
-        assert!(net.configure_scion_link(r1, r2, ScionLinkType::Core).is_ok());
+        assert!(net
+            .configure_scion_link(r1, r2, ScionLinkType::Core)
+            .is_ok());
 
         // Verify interfaces were added
         let cs1 = net.get_router(r1).unwrap().scion().unwrap();
@@ -1808,7 +2279,8 @@ mod tests {
         net.enable_scion(r2, IsdAs::new(1, 120u64), true).unwrap();
 
         // Configure SCION link
-        net.configure_scion_link(r1, r2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(r1, r2, ScionLinkType::Core)
+            .unwrap();
 
         // Run core beaconing
         let created = net.scion_core_beaconing(1000).unwrap();
@@ -1833,11 +2305,14 @@ mod tests {
         net.add_link(core1, child1).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
 
         // Configure link
-        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run core beaconing (child1 receives PCBs)
         net.scion_core_beaconing(1000).unwrap();
@@ -1864,11 +2339,14 @@ mod tests {
         net.add_link(core1, child1).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
 
         // Configure link
-        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run core beaconing + up-segment registration
         net.scion_core_beaconing(1000).unwrap();
@@ -1896,11 +2374,14 @@ mod tests {
         net.add_link(core1, core2).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(core2, IsdAs::new(1, 120u64), true).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(core2, IsdAs::new(1, 120u64), true)
+            .unwrap();
 
         // Configure link
-        net.configure_scion_link(core1, core2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1, core2, ScionLinkType::Core)
+            .unwrap();
 
         // Run core beaconing
         net.scion_core_beaconing(1000).unwrap();
@@ -1929,13 +2410,18 @@ mod tests {
         net.add_link(core1, child1).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(core2, IsdAs::new(1, 120u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 130u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(core2, IsdAs::new(1, 120u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         // Configure links
-        net.configure_scion_link(core1, core2, ScionLinkType::Core).unwrap();
-        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1, core2, ScionLinkType::Core)
+            .unwrap();
+        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing
         net.scion_core_beaconing(1000).unwrap();
@@ -1961,13 +2447,18 @@ mod tests {
         net.add_link(core1, child2).unwrap();
 
         // Enable SCION (all in ISD 1)
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
-        net.enable_scion(child2, IsdAs::new(1, 130u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
+        net.enable_scion(child2, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         // Configure links
-        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild).unwrap();
-        net.configure_scion_link(core1, child2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild)
+            .unwrap();
+        net.configure_scion_link(core1, child2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -1996,11 +2487,14 @@ mod tests {
         net.add_link(core1, child1).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
 
         // Configure link
-        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1, child1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2032,18 +2526,28 @@ mod tests {
         net.add_link(core3, child2).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(core2, IsdAs::new(1, 111u64), true).unwrap();
-        net.enable_scion(core3, IsdAs::new(1, 112u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
-        net.enable_scion(child2, IsdAs::new(1, 130u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(core2, IsdAs::new(1, 111u64), true)
+            .unwrap();
+        net.enable_scion(core3, IsdAs::new(1, 112u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
+        net.enable_scion(child2, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         // Configure links
-        net.configure_scion_link(child1, core1, ScionLinkType::ParentChild).unwrap();
-        net.configure_scion_link(child1, core2, ScionLinkType::ParentChild).unwrap();
-        net.configure_scion_link(core1, core3, ScionLinkType::Core).unwrap();
-        net.configure_scion_link(core2, core3, ScionLinkType::Core).unwrap();
-        net.configure_scion_link(core3, child2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(child1, core1, ScionLinkType::ParentChild)
+            .unwrap();
+        net.configure_scion_link(child1, core2, ScionLinkType::ParentChild)
+            .unwrap();
+        net.configure_scion_link(core1, core3, ScionLinkType::Core)
+            .unwrap();
+        net.configure_scion_link(core2, core3, ScionLinkType::Core)
+            .unwrap();
+        net.configure_scion_link(core3, child2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_intra_isd_beaconing(1000, 5).unwrap();
@@ -2059,15 +2563,15 @@ mod tests {
 
         // Use shortest path policy to select best 2 paths
         let policy = ShortestPathPolicy;
-        let selected_paths = net.scion_lookup_paths_with_selection(
-            child1,
-            child2,
-            &policy,
-            2,
-        ).unwrap();
+        let selected_paths = net
+            .scion_lookup_paths_with_selection(child1, child2, &policy, 2)
+            .unwrap();
 
         // Verify selection
-        assert!(!selected_paths.is_empty(), "Should select at least one path");
+        assert!(
+            !selected_paths.is_empty(),
+            "Should select at least one path"
+        );
         assert!(selected_paths.len() <= 2, "Should not exceed max_count");
 
         // Verify paths are sorted by length
@@ -2094,13 +2598,18 @@ mod tests {
         net.add_link(core1, child2).unwrap();
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(child1, IsdAs::new(1, 120u64), false).unwrap();
-        net.enable_scion(child2, IsdAs::new(1, 130u64), false).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(child1, IsdAs::new(1, 120u64), false)
+            .unwrap();
+        net.enable_scion(child2, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         // Configure links
-        net.configure_scion_link(child1, core1, ScionLinkType::ParentChild).unwrap();
-        net.configure_scion_link(core1, child2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(child1, core1, ScionLinkType::ParentChild)
+            .unwrap();
+        net.configure_scion_link(core1, child2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_intra_isd_beaconing(1000, 5).unwrap();
@@ -2115,15 +2624,15 @@ mod tests {
 
         // Use highest MTU policy
         let policy = HighestMtuPolicy;
-        let selected_paths = net.scion_lookup_paths_with_selection(
-            child1,
-            child2,
-            &policy,
-            1,
-        ).unwrap();
+        let selected_paths = net
+            .scion_lookup_paths_with_selection(child1, child2, &policy, 1)
+            .unwrap();
 
         // Should find at least one path
-        assert!(!selected_paths.is_empty(), "Should select at least one path");
+        assert!(
+            !selected_paths.is_empty(),
+            "Should select at least one path"
+        );
         assert_eq!(selected_paths.len(), 1, "Should respect max_count");
     }
 
@@ -2140,20 +2649,22 @@ mod tests {
         // No links between them
 
         // Enable SCION
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(core2, IsdAs::new(1, 120u64), true).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(core2, IsdAs::new(1, 120u64), true)
+            .unwrap();
 
         // Try to lookup paths with selection
         let policy = ShortestPathPolicy;
-        let selected_paths = net.scion_lookup_paths_with_selection(
-            core1,
-            core2,
-            &policy,
-            5,
-        ).unwrap();
+        let selected_paths = net
+            .scion_lookup_paths_with_selection(core1, core2, &policy, 5)
+            .unwrap();
 
         // Should return empty vector
-        assert!(selected_paths.is_empty(), "Should return no paths for disconnected routers");
+        assert!(
+            selected_paths.is_empty(),
+            "Should return no paths for disconnected routers"
+        );
     }
 
     #[test]
@@ -2162,15 +2673,18 @@ mod tests {
 
         // Create ISD 1 with one core AS
         let core1_isd1 = net.add_router("Core1_ISD1", 65500);
-        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true).unwrap();
+        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true)
+            .unwrap();
 
         // Create ISD 2 with one core AS
         let core1_isd2 = net.add_router("Core1_ISD2", 65501);
-        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true).unwrap();
+        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true)
+            .unwrap();
 
         // Connect the two ISDs via core link
         net.add_link(core1_isd1, core1_isd2).unwrap();
-        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core)
+            .unwrap();
 
         // Run core beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2180,13 +2694,24 @@ mod tests {
         let paths = net.scion_lookup_paths(core1_isd1, core1_isd2).unwrap();
 
         let cs1 = net.get_router(core1_isd1).unwrap().scion().unwrap();
-        eprintln!("Core1_ISD1 has {} core segments", cs1.path_database.get_all_core_segments().len());
+        eprintln!(
+            "Core1_ISD1 has {} core segments",
+            cs1.path_database.get_all_core_segments().len()
+        );
         for (i, seg) in cs1.path_database.get_all_core_segments().iter().enumerate() {
-            eprintln!("  Segment {}: {:?} -> {:?}", i, seg.source(), seg.destination());
+            eprintln!(
+                "  Segment {}: {:?} -> {:?}",
+                i,
+                seg.source(),
+                seg.destination()
+            );
         }
         eprintln!("Found {} paths", paths.len());
 
-        assert!(!paths.is_empty(), "Should find inter-ISD path between core ASes");
+        assert!(
+            !paths.is_empty(),
+            "Should find inter-ISD path between core ASes"
+        );
         assert_eq!(paths.len(), 1, "Should find exactly one path");
 
         let path = &paths[0];
@@ -2205,24 +2730,31 @@ mod tests {
         // Create ISD 1 with hierarchy
         let core1_isd1 = net.add_router("Core1_ISD1", 65500);
         let leaf1_isd1 = net.add_router("Leaf1_ISD1", 65501);
-        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(leaf1_isd1, IsdAs::new(1, 111u64), false).unwrap();
+        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(leaf1_isd1, IsdAs::new(1, 111u64), false)
+            .unwrap();
 
         net.add_link(core1_isd1, leaf1_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Create ISD 2 with hierarchy
         let core1_isd2 = net.add_router("Core1_ISD2", 65502);
         let leaf1_isd2 = net.add_router("Leaf1_ISD2", 65503);
-        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true).unwrap();
-        net.enable_scion(leaf1_isd2, IsdAs::new(2, 211u64), false).unwrap();
+        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true)
+            .unwrap();
+        net.enable_scion(leaf1_isd2, IsdAs::new(2, 211u64), false)
+            .unwrap();
 
         net.add_link(core1_isd2, leaf1_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Connect the two ISDs via core link
         net.add_link(core1_isd1, core1_isd2).unwrap();
-        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2232,14 +2764,37 @@ mod tests {
         // Lookup paths from leaf in ISD1 to leaf in ISD2
         let paths = net.scion_lookup_paths(leaf1_isd1, leaf1_isd2).unwrap();
 
-        assert!(!paths.is_empty(), "Should find inter-ISD path between leaf ASes");
+        assert!(
+            !paths.is_empty(),
+            "Should find inter-ISD path between leaf ASes"
+        );
 
         let path = &paths[0];
-        assert_eq!(path.as_path.len(), 4, "Path should traverse 4 ASes (leaf-core-core-leaf)");
-        assert_eq!(path.as_path[0], IsdAs::new(1, 111u64), "Should start at ISD1 leaf");
-        assert_eq!(path.as_path[1], IsdAs::new(1, 110u64), "Should go through ISD1 core");
-        assert_eq!(path.as_path[2], IsdAs::new(2, 210u64), "Should go through ISD2 core");
-        assert_eq!(path.as_path[3], IsdAs::new(2, 211u64), "Should end at ISD2 leaf");
+        assert_eq!(
+            path.as_path.len(),
+            4,
+            "Path should traverse 4 ASes (leaf-core-core-leaf)"
+        );
+        assert_eq!(
+            path.as_path[0],
+            IsdAs::new(1, 111u64),
+            "Should start at ISD1 leaf"
+        );
+        assert_eq!(
+            path.as_path[1],
+            IsdAs::new(1, 110u64),
+            "Should go through ISD1 core"
+        );
+        assert_eq!(
+            path.as_path[2],
+            IsdAs::new(2, 210u64),
+            "Should go through ISD2 core"
+        );
+        assert_eq!(
+            path.as_path[3],
+            IsdAs::new(2, 211u64),
+            "Should end at ISD2 leaf"
+        );
 
         // Verify segment composition
         assert!(path.up_segment.is_some(), "Should have up segment");
@@ -2253,23 +2808,28 @@ mod tests {
 
         // Create ISD 1
         let core1 = net.add_router("Core1", 65500);
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
 
         // Create ISD 2
         let core2 = net.add_router("Core2", 65501);
-        net.enable_scion(core2, IsdAs::new(2, 210u64), true).unwrap();
+        net.enable_scion(core2, IsdAs::new(2, 210u64), true)
+            .unwrap();
 
         // Create ISD 3
         let core3 = net.add_router("Core3", 65502);
-        net.enable_scion(core3, IsdAs::new(3, 310u64), true).unwrap();
+        net.enable_scion(core3, IsdAs::new(3, 310u64), true)
+            .unwrap();
 
         // Connect ISD1 <-> ISD2
         net.add_link(core1, core2).unwrap();
-        net.configure_scion_link(core1, core2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1, core2, ScionLinkType::Core)
+            .unwrap();
 
         // Connect ISD2 <-> ISD3
         net.add_link(core2, core3).unwrap();
-        net.configure_scion_link(core2, core3, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core2, core3, ScionLinkType::Core)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2293,11 +2853,13 @@ mod tests {
 
         // Create ISD 1
         let core1 = net.add_router("Core1", 65500);
-        net.enable_scion(core1, IsdAs::new(1, 110u64), true).unwrap();
+        net.enable_scion(core1, IsdAs::new(1, 110u64), true)
+            .unwrap();
 
         // Create ISD 2 (disconnected)
         let core2 = net.add_router("Core2", 65501);
-        net.enable_scion(core2, IsdAs::new(2, 210u64), true).unwrap();
+        net.enable_scion(core2, IsdAs::new(2, 210u64), true)
+            .unwrap();
 
         // No link between ISDs
 
@@ -2308,7 +2870,10 @@ mod tests {
         // Lookup paths should return empty
         let paths = net.scion_lookup_paths(core1, core2).unwrap();
 
-        assert!(paths.is_empty(), "Should find no path between disconnected ISDs");
+        assert!(
+            paths.is_empty(),
+            "Should find no path between disconnected ISDs"
+        );
     }
 
     #[test]
@@ -2319,37 +2884,49 @@ mod tests {
         let core1_isd1 = net.add_router("Core1_ISD1", 65500);
         let as1_isd1 = net.add_router("AS1_ISD1", 65501);
         let as2_isd1 = net.add_router("AS2_ISD1", 65502);
-        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(as1_isd1, IsdAs::new(1, 111u64), false).unwrap();
-        net.enable_scion(as2_isd1, IsdAs::new(1, 112u64), false).unwrap();
+        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(as1_isd1, IsdAs::new(1, 111u64), false)
+            .unwrap();
+        net.enable_scion(as2_isd1, IsdAs::new(1, 112u64), false)
+            .unwrap();
 
         // Links in ISD1
         net.add_link(core1_isd1, as1_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, as1_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd1, as1_isd1, ScionLinkType::ParentChild)
+            .unwrap();
         net.add_link(core1_isd1, as2_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, as2_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd1, as2_isd1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Create ISD 2 with hierarchy
         let core1_isd2 = net.add_router("Core1_ISD2", 65503);
         let as1_isd2 = net.add_router("AS1_ISD2", 65504);
         let as2_isd2 = net.add_router("AS2_ISD2", 65505);
-        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true).unwrap();
-        net.enable_scion(as1_isd2, IsdAs::new(2, 211u64), false).unwrap();
-        net.enable_scion(as2_isd2, IsdAs::new(2, 212u64), false).unwrap();
+        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true)
+            .unwrap();
+        net.enable_scion(as1_isd2, IsdAs::new(2, 211u64), false)
+            .unwrap();
+        net.enable_scion(as2_isd2, IsdAs::new(2, 212u64), false)
+            .unwrap();
 
         // Links in ISD2
         net.add_link(core1_isd2, as1_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, as1_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd2, as1_isd2, ScionLinkType::ParentChild)
+            .unwrap();
         net.add_link(core1_isd2, as2_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, as2_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd2, as2_isd2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Core link between ISDs
         net.add_link(core1_isd1, core1_isd2).unwrap();
-        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core)
+            .unwrap();
 
         // Peering link between AS1 in ISD1 and AS1 in ISD2
         net.add_link(as1_isd1, as1_isd2).unwrap();
-        net.configure_scion_link(as1_isd1, as1_isd2, ScionLinkType::Peering).unwrap();
+        net.configure_scion_link(as1_isd1, as1_isd2, ScionLinkType::Peering)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2368,7 +2945,10 @@ mod tests {
 
         // Verify the normal path exists
         let normal_path = paths.iter().find(|p| p.as_path.len() == 4);
-        assert!(normal_path.is_some(), "Should have normal 4-AS path through cores");
+        assert!(
+            normal_path.is_some(),
+            "Should have normal 4-AS path through cores"
+        );
     }
 
     #[test]
@@ -2382,7 +2962,8 @@ mod tests {
 
         net.enable_scion(r1, IsdAs::new(1, 110u64), true).unwrap();
         net.enable_scion(r2, IsdAs::new(1, 120u64), true).unwrap();
-        net.configure_scion_link(r1, r2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(r1, r2, ScionLinkType::Core)
+            .unwrap();
 
         // Generate beacons
         net.scion_core_beaconing(1000).unwrap();
@@ -2411,7 +2992,8 @@ mod tests {
 
         net.enable_scion(r1, IsdAs::new(1, 110u64), true).unwrap();
         net.enable_scion(r2, IsdAs::new(1, 120u64), true).unwrap();
-        net.configure_scion_link(r1, r2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(r1, r2, ScionLinkType::Core)
+            .unwrap();
 
         // Verify interface exists
         let cs1_before = net.get_router(r1).unwrap().scion().unwrap();
@@ -2438,10 +3020,12 @@ mod tests {
         net.add_link(core, leaf).unwrap();
 
         net.enable_scion(core, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(leaf, IsdAs::new(1, 111u64), false).unwrap();
+        net.enable_scion(leaf, IsdAs::new(1, 111u64), false)
+            .unwrap();
 
         // Configure link with specific MTU
-        net.configure_scion_link(core, leaf, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core, leaf, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Run beaconing and registration
         net.scion_core_beaconing(1000).unwrap();
@@ -2466,18 +3050,25 @@ mod tests {
         let leaf1_isd1 = net.add_router("Leaf1_ISD1", 65502);
         let leaf2_isd1 = net.add_router("Leaf2_ISD1", 65503);
 
-        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true).unwrap();
-        net.enable_scion(core2_isd1, IsdAs::new(1, 120u64), true).unwrap();
-        net.enable_scion(leaf1_isd1, IsdAs::new(1, 111u64), false).unwrap();
-        net.enable_scion(leaf2_isd1, IsdAs::new(1, 121u64), false).unwrap();
+        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true)
+            .unwrap();
+        net.enable_scion(core2_isd1, IsdAs::new(1, 120u64), true)
+            .unwrap();
+        net.enable_scion(leaf1_isd1, IsdAs::new(1, 111u64), false)
+            .unwrap();
+        net.enable_scion(leaf2_isd1, IsdAs::new(1, 121u64), false)
+            .unwrap();
 
         // ISD1 topology
         net.add_link(core1_isd1, core2_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, core2_isd1, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core2_isd1, ScionLinkType::Core)
+            .unwrap();
         net.add_link(core1_isd1, leaf1_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild)
+            .unwrap();
         net.add_link(core2_isd1, leaf2_isd1).unwrap();
-        net.configure_scion_link(core2_isd1, leaf2_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core2_isd1, leaf2_isd1, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Create ISD 2 with 2 core ASes and children
         let core1_isd2 = net.add_router("Core1_ISD2", 65504);
@@ -2485,24 +3076,33 @@ mod tests {
         let leaf1_isd2 = net.add_router("Leaf1_ISD2", 65506);
         let leaf2_isd2 = net.add_router("Leaf2_ISD2", 65507);
 
-        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true).unwrap();
-        net.enable_scion(core2_isd2, IsdAs::new(2, 220u64), true).unwrap();
-        net.enable_scion(leaf1_isd2, IsdAs::new(2, 211u64), false).unwrap();
-        net.enable_scion(leaf2_isd2, IsdAs::new(2, 221u64), false).unwrap();
+        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true)
+            .unwrap();
+        net.enable_scion(core2_isd2, IsdAs::new(2, 220u64), true)
+            .unwrap();
+        net.enable_scion(leaf1_isd2, IsdAs::new(2, 211u64), false)
+            .unwrap();
+        net.enable_scion(leaf2_isd2, IsdAs::new(2, 221u64), false)
+            .unwrap();
 
         // ISD2 topology
         net.add_link(core1_isd2, core2_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, core2_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd2, core2_isd2, ScionLinkType::Core)
+            .unwrap();
         net.add_link(core1_isd2, leaf1_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild)
+            .unwrap();
         net.add_link(core2_isd2, leaf2_isd2).unwrap();
-        net.configure_scion_link(core2_isd2, leaf2_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core2_isd2, leaf2_isd2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Inter-ISD core links
         net.add_link(core1_isd1, core1_isd2).unwrap();
-        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core)
+            .unwrap();
         net.add_link(core2_isd1, core2_isd2).unwrap();
-        net.configure_scion_link(core2_isd1, core2_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core2_isd1, core2_isd2, ScionLinkType::Core)
+            .unwrap();
 
         // Complete beaconing and registration workflow
         net.scion_core_beaconing(1000).unwrap();
@@ -2513,28 +3113,50 @@ mod tests {
 
         // 1. Leaf to leaf in different ISDs
         let paths_leaf_to_leaf = net.scion_lookup_paths(leaf1_isd1, leaf1_isd2).unwrap();
-        assert!(!paths_leaf_to_leaf.is_empty(), "Should find paths between leaves across ISDs");
+        assert!(
+            !paths_leaf_to_leaf.is_empty(),
+            "Should find paths between leaves across ISDs"
+        );
 
         // 2. Core to core across ISDs
         let paths_core_to_core = net.scion_lookup_paths(core1_isd1, core1_isd2).unwrap();
-        assert!(!paths_core_to_core.is_empty(), "Should find paths between cores across ISDs");
+        assert!(
+            !paths_core_to_core.is_empty(),
+            "Should find paths between cores across ISDs"
+        );
 
         // 3. Leaf to core across ISDs
         let paths_leaf_to_core = net.scion_lookup_paths(leaf1_isd1, core1_isd2).unwrap();
-        assert!(!paths_leaf_to_core.is_empty(), "Should find paths from leaf to core across ISDs");
+        assert!(
+            !paths_leaf_to_core.is_empty(),
+            "Should find paths from leaf to core across ISDs"
+        );
 
         // Verify path diversity - should have multiple paths due to multiple core-to-core links
-        assert!(paths_leaf_to_leaf.len() >= 2, "Should have path diversity with multiple core links");
+        assert!(
+            paths_leaf_to_leaf.len() >= 2,
+            "Should have path diversity with multiple core links"
+        );
 
         // Verify path properties
         for path in &paths_leaf_to_leaf {
-            assert!(path.as_path.len() >= 4, "Inter-ISD leaf-to-leaf path should have at least 4 ASes");
+            assert!(
+                path.as_path.len() >= 4,
+                "Inter-ISD leaf-to-leaf path should have at least 4 ASes"
+            );
             assert_eq!(path.as_path[0].isd.0, 1, "Should start in ISD 1");
-            assert_eq!(path.as_path[path.as_path.len() - 1].isd.0, 2, "Should end in ISD 2");
+            assert_eq!(
+                path.as_path[path.as_path.len() - 1].isd.0,
+                2,
+                "Should end in ISD 2"
+            );
 
             // Verify segment composition
             assert!(path.up_segment.is_some(), "Should have up segment");
-            assert!(path.core_segment.is_some(), "Should have core segment for inter-ISD");
+            assert!(
+                path.core_segment.is_some(),
+                "Should have core segment for inter-ISD"
+            );
             assert!(path.down_segment.is_some(), "Should have down segment");
         }
     }
@@ -2546,33 +3168,42 @@ mod tests {
 
         // ISD 1: Core1, Core2, Leaf1
         let core1_isd1 = net.add_router("Core1_ISD1", 65500);
-        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true).unwrap();
+        net.enable_scion(core1_isd1, IsdAs::new(1, 110u64), true)
+            .unwrap();
 
         let core2_isd1 = net.add_router("Core2_ISD1", 65500);
-        net.enable_scion(core2_isd1, IsdAs::new(1, 120u64), true).unwrap();
+        net.enable_scion(core2_isd1, IsdAs::new(1, 120u64), true)
+            .unwrap();
 
         let leaf1_isd1 = net.add_router("Leaf1_ISD1", 65500);
-        net.enable_scion(leaf1_isd1, IsdAs::new(1, 130u64), false).unwrap();
+        net.enable_scion(leaf1_isd1, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         // ISD 2: Core1, Leaf1
         let core1_isd2 = net.add_router("Core1_ISD2", 65500);
-        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true).unwrap();
+        net.enable_scion(core1_isd2, IsdAs::new(2, 210u64), true)
+            .unwrap();
 
         let leaf1_isd2 = net.add_router("Leaf1_ISD2", 65500);
-        net.enable_scion(leaf1_isd2, IsdAs::new(2, 220u64), false).unwrap();
+        net.enable_scion(leaf1_isd2, IsdAs::new(2, 220u64), false)
+            .unwrap();
 
         // Intra-ISD links
         net.add_link(core1_isd1, core2_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, core2_isd1, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core2_isd1, ScionLinkType::Core)
+            .unwrap();
         net.add_link(core1_isd1, leaf1_isd1).unwrap();
-        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd1, leaf1_isd1, ScionLinkType::ParentChild)
+            .unwrap();
 
         net.add_link(core1_isd2, leaf1_isd2).unwrap();
-        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core1_isd2, leaf1_isd2, ScionLinkType::ParentChild)
+            .unwrap();
 
         // Inter-ISD core link
         net.add_link(core1_isd1, core1_isd2).unwrap();
-        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core).unwrap();
+        net.configure_scion_link(core1_isd1, core1_isd2, ScionLinkType::Core)
+            .unwrap();
 
         // === Event-Driven Beaconing ===
         let core_count = net.scion_start_beaconing(1000).unwrap();
@@ -2580,54 +3211,88 @@ mod tests {
 
         let events_processed = net.scion_converge().unwrap();
         assert!(events_processed > 0, "Should process at least one event");
-        println!("Event-driven beaconing processed {} events", events_processed);
+        println!(
+            "Event-driven beaconing processed {} events",
+            events_processed
+        );
 
         // Verify PCBs were propagated
         // Core1_ISD1 should receive PCBs from Core2_ISD1 and Core1_ISD2
         let bs_core1_isd1 = net.get_scion_beacon_store(core1_isd1).unwrap();
         println!("Core1_ISD1 has {} PCBs", bs_core1_isd1.total_count());
-        assert!(bs_core1_isd1.total_count() >= 2, "Core1_ISD1 should have at least 2 PCBs");
+        assert!(
+            bs_core1_isd1.total_count() >= 2,
+            "Core1_ISD1 should have at least 2 PCBs"
+        );
 
         // Core2_ISD1 should receive PCBs from Core1_ISD1 and possibly Core1_ISD2 (foreign ISD)
         let bs_core2_isd1 = net.get_scion_beacon_store(core2_isd1).unwrap();
         println!("Core2_ISD1 has {} PCBs", bs_core2_isd1.total_count());
-        assert!(bs_core2_isd1.total_count() >= 1, "Core2_ISD1 should have at least 1 PCB");
+        assert!(
+            bs_core2_isd1.total_count() >= 1,
+            "Core2_ISD1 should have at least 1 PCB"
+        );
 
         // Leaf1_ISD1 should receive PCBs from core ASes
         let bs_leaf1_isd1 = net.get_scion_beacon_store(leaf1_isd1).unwrap();
-        assert!(bs_leaf1_isd1.total_count() >= 1, "Leaf1_ISD1 should have PCBs from parents");
+        assert!(
+            bs_leaf1_isd1.total_count() >= 1,
+            "Leaf1_ISD1 should have PCBs from parents"
+        );
 
         // Leaf1_ISD2 should receive PCBs from Core1_ISD2
         let bs_leaf1_isd2 = net.get_scion_beacon_store(leaf1_isd2).unwrap();
-        assert!(bs_leaf1_isd2.total_count() >= 1, "Leaf1_ISD2 should have PCBs from parent");
+        assert!(
+            bs_leaf1_isd2.total_count() >= 1,
+            "Leaf1_ISD2 should have PCBs from parent"
+        );
 
         // === Compare with Batch Mode ===
         // Create identical topology for batch mode
-        let mut net_batch: Network<SimplePrefix, BasicEventQueue<_>, GlobalOspf> = Network::default();
+        let mut net_batch: Network<SimplePrefix, BasicEventQueue<_>, GlobalOspf> =
+            Network::default();
 
         let core1_isd1_b = net_batch.add_router("Core1_ISD1", 65500);
-        net_batch.enable_scion(core1_isd1_b, IsdAs::new(1, 110u64), true).unwrap();
+        net_batch
+            .enable_scion(core1_isd1_b, IsdAs::new(1, 110u64), true)
+            .unwrap();
 
         let core2_isd1_b = net_batch.add_router("Core2_ISD1", 65500);
-        net_batch.enable_scion(core2_isd1_b, IsdAs::new(1, 120u64), true).unwrap();
+        net_batch
+            .enable_scion(core2_isd1_b, IsdAs::new(1, 120u64), true)
+            .unwrap();
 
         let leaf1_isd1_b = net_batch.add_router("Leaf1_ISD1", 65500);
-        net_batch.enable_scion(leaf1_isd1_b, IsdAs::new(1, 130u64), false).unwrap();
+        net_batch
+            .enable_scion(leaf1_isd1_b, IsdAs::new(1, 130u64), false)
+            .unwrap();
 
         let core1_isd2_b = net_batch.add_router("Core1_ISD2", 65500);
-        net_batch.enable_scion(core1_isd2_b, IsdAs::new(2, 210u64), true).unwrap();
+        net_batch
+            .enable_scion(core1_isd2_b, IsdAs::new(2, 210u64), true)
+            .unwrap();
 
         let leaf1_isd2_b = net_batch.add_router("Leaf1_ISD2", 65500);
-        net_batch.enable_scion(leaf1_isd2_b, IsdAs::new(2, 220u64), false).unwrap();
+        net_batch
+            .enable_scion(leaf1_isd2_b, IsdAs::new(2, 220u64), false)
+            .unwrap();
 
         net_batch.add_link(core1_isd1_b, core2_isd1_b).unwrap();
-        net_batch.configure_scion_link(core1_isd1_b, core2_isd1_b, ScionLinkType::Core).unwrap();
+        net_batch
+            .configure_scion_link(core1_isd1_b, core2_isd1_b, ScionLinkType::Core)
+            .unwrap();
         net_batch.add_link(core1_isd1_b, leaf1_isd1_b).unwrap();
-        net_batch.configure_scion_link(core1_isd1_b, leaf1_isd1_b, ScionLinkType::ParentChild).unwrap();
+        net_batch
+            .configure_scion_link(core1_isd1_b, leaf1_isd1_b, ScionLinkType::ParentChild)
+            .unwrap();
         net_batch.add_link(core1_isd2_b, leaf1_isd2_b).unwrap();
-        net_batch.configure_scion_link(core1_isd2_b, leaf1_isd2_b, ScionLinkType::ParentChild).unwrap();
+        net_batch
+            .configure_scion_link(core1_isd2_b, leaf1_isd2_b, ScionLinkType::ParentChild)
+            .unwrap();
         net_batch.add_link(core1_isd1_b, core1_isd2_b).unwrap();
-        net_batch.configure_scion_link(core1_isd1_b, core1_isd2_b, ScionLinkType::Core).unwrap();
+        net_batch
+            .configure_scion_link(core1_isd1_b, core1_isd2_b, ScionLinkType::Core)
+            .unwrap();
 
         // Run batch mode beaconing once (equivalent to single event-driven convergence)
         net_batch.scion_core_beaconing(1000).unwrap();
@@ -2637,9 +3302,11 @@ mod tests {
         let bs_core1_isd1_batch = net_batch.get_scion_beacon_store(core1_isd1_b).unwrap();
         let bs_leaf1_isd1_batch = net_batch.get_scion_beacon_store(leaf1_isd1_b).unwrap();
 
-        println!("Batch mode: Core1_ISD1 has {} PCBs, Leaf1_ISD1 has {} PCBs",
+        println!(
+            "Batch mode: Core1_ISD1 has {} PCBs, Leaf1_ISD1 has {} PCBs",
             bs_core1_isd1_batch.total_count(),
-            bs_leaf1_isd1_batch.total_count());
+            bs_leaf1_isd1_batch.total_count()
+        );
 
         // Event-driven should have at least as many PCBs as batch mode
         // (may have more due to complete propagation)
@@ -2654,9 +3321,11 @@ mod tests {
         );
 
         println!("✓ Event-driven beaconing converged successfully");
-        println!("✓ Event-driven found {} events, {} core PCBs, {} leaf PCBs",
+        println!(
+            "✓ Event-driven found {} events, {} core PCBs, {} leaf PCBs",
             events_processed,
             bs_core1_isd1.total_count(),
-            bs_leaf1_isd1.total_count());
+            bs_leaf1_isd1.total_count()
+        );
     }
 }

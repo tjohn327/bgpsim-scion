@@ -74,6 +74,11 @@ name = "simple_path_diversity"
 path = "../examples/simple_path_diversity.rs"
 required-features = ["scion"]
 
+[[example]]
+name = "scion_static_scaling"
+path = "../examples/scion_static_scaling.rs"
+required-features = ["scion"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
 rand = ["dep:rand"]
@@ -123,4 +128,9 @@ generic-tests = "0.1.2"
   name = "simple_multi_isd"
   path = "../examples/simple_multi_isd.rs"
   required-features = ["scion"]
-  
+
+  [[example]]
+  name = "multi_isd_multi_router_test"
+  path = "../examples/multi_isd_multi_router_test.rs"
+  required-features = ["scion"]
+

@@ -4,11 +4,11 @@
 //
 // Test path diversity with single ISD to understand max_pcbs impact
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, IsdNumber, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 use std::time::Instant;
 
 fn main() -> Result<(), NetworkError> {
@@ -16,7 +16,8 @@ fn main() -> Result<(), NetworkError> {
 
     // Create a moderately complex single-ISD topology
     // with multiple paths between ASes
-    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> = Network::default();
+    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> =
+        Network::default();
 
     // ISD 1 with 1 core, 4 transit, 8 leaf ASes = 13 total
     let core1 = net.add_router("Core1", ASN(101));
@@ -42,14 +43,22 @@ fn main() -> Result<(), NetworkError> {
     }
 
     // Each leaf connects to 2 transits (creates path diversity)
-    net.add_link(t1, l1)?; net.add_link(t2, l1)?;
-    net.add_link(t1, l2)?; net.add_link(t2, l2)?;
-    net.add_link(t2, l3)?; net.add_link(t3, l3)?;
-    net.add_link(t2, l4)?; net.add_link(t3, l4)?;
-    net.add_link(t3, l5)?; net.add_link(t4, l5)?;
-    net.add_link(t3, l6)?; net.add_link(t4, l6)?;
-    net.add_link(t4, l7)?; net.add_link(t1, l7)?;
-    net.add_link(t4, l8)?; net.add_link(t1, l8)?;
+    net.add_link(t1, l1)?;
+    net.add_link(t2, l1)?;
+    net.add_link(t1, l2)?;
+    net.add_link(t2, l2)?;
+    net.add_link(t2, l3)?;
+    net.add_link(t3, l3)?;
+    net.add_link(t2, l4)?;
+    net.add_link(t3, l4)?;
+    net.add_link(t3, l5)?;
+    net.add_link(t4, l5)?;
+    net.add_link(t3, l6)?;
+    net.add_link(t4, l6)?;
+    net.add_link(t4, l7)?;
+    net.add_link(t1, l7)?;
+    net.add_link(t4, l8)?;
+    net.add_link(t1, l8)?;
 
     println!("Created topology: 1 core, 4 transit, 8 leaf = 13 ASes");
     println!("Each leaf has 2 upstream paths for diversity\n");
@@ -68,9 +77,15 @@ fn main() -> Result<(), NetworkError> {
     // Configure links
     let all_routers: Vec<_> = net.indices().collect();
     for &router in &all_routers {
-        let r_is_core = net.get_router(router)?.scion().map(|s| s.is_core).unwrap_or(false);
+        let r_is_core = net
+            .get_router(router)?
+            .scion()
+            .map(|s| s.is_core)
+            .unwrap_or(false);
 
-        let neighbors: Vec<_> = net.ospf_network().neighbors(router)
+        let neighbors: Vec<_> = net
+            .ospf_network()
+            .neighbors(router)
             .map(|e| e.src())
             .collect();
 
@@ -79,7 +94,11 @@ fn main() -> Result<(), NetworkError> {
                 continue;
             }
 
-            let n_is_core = net.get_router(neighbor)?.scion().map(|s| s.is_core).unwrap_or(false);
+            let n_is_core = net
+                .get_router(neighbor)?
+                .scion()
+                .map(|s| s.is_core)
+                .unwrap_or(false);
 
             let link_type = if r_is_core || n_is_core {
                 ScionLinkType::ParentChild
@@ -96,8 +115,10 @@ fn main() -> Result<(), NetworkError> {
     // Test different max_pcbs values
     let max_pcbs_values = vec![2, 5, 10, 20, 50, 100];
 
-    println!("{:<10} {:<15} {:<15} {:<15} {:<15}",
-             "max_pcbs", "Beacon Time", "Reg Time", "L1→L5 Paths", "All Segments");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15} {:<15}",
+        "max_pcbs", "Beacon Time", "Reg Time", "L1→L5 Paths", "All Segments"
+    );
     println!("{}", "-".repeat(70));
 
     for &max_pcbs in &max_pcbs_values {
@@ -127,25 +148,33 @@ fn main() -> Result<(), NetworkError> {
         let mut total_paths = 0;
         let mut count = 0;
         for i in 0..leaves.len() {
-            for j in (i+1)..leaves.len() {
+            for j in (i + 1)..leaves.len() {
                 if let Ok(paths) = test_net.scion_lookup_paths(leaves[i], leaves[j]) {
                     total_paths += paths.len();
                     count += 1;
                 }
             }
         }
-        let avg_paths = if count > 0 { total_paths as f64 / count as f64 } else { 0.0 };
+        let avg_paths = if count > 0 {
+            total_paths as f64 / count as f64
+        } else {
+            0.0
+        };
 
-        println!("{:<10} {:<15.4} {:<15.4} {:<15} {:<15}",
-                 max_pcbs,
-                 beacon_time.as_secs_f64(),
-                 reg_time.as_secs_f64(),
-                 paths_l1_l5.len(),
-                 up + down + core);
+        println!(
+            "{:<10} {:<15.4} {:<15.4} {:<15} {:<15}",
+            max_pcbs,
+            beacon_time.as_secs_f64(),
+            reg_time.as_secs_f64(),
+            paths_l1_l5.len(),
+            up + down + core
+        );
 
         if max_pcbs == 2 || max_pcbs == 100 {
-            println!("  └─ Detail: {} up, {} down, {} core segments | Avg paths: {:.1}",
-                     up, down, core, avg_paths);
+            println!(
+                "  └─ Detail: {} up, {} down, {} core segments | Avg paths: {:.1}",
+                up, down, core, avg_paths
+            );
         }
     }
 

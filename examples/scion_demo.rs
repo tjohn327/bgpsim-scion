@@ -9,11 +9,11 @@
 // - Verbose beaconing and registration output
 // - Path segment analysis and statistics
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
-use bgpsim::types::SimplePrefix;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, ScionLinkType};
+use bgpsim::types::SimplePrefix;
 use std::collections::HashMap;
 
 type Net = Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf>;
@@ -191,7 +191,11 @@ fn create_intra_isd_links(net: &mut Net, isd: &IsdTopology) -> Result<(), Networ
         for i in 0..isd.transits.len().min(2) {
             for j in (i + 1)..isd.transits.len().min(3) {
                 net.add_link(isd.transits[i].0, isd.transits[j].0)?;
-                net.configure_scion_link(isd.transits[i].0, isd.transits[j].0, ScionLinkType::Peering)?;
+                net.configure_scion_link(
+                    isd.transits[i].0,
+                    isd.transits[j].0,
+                    ScionLinkType::Peering,
+                )?;
             }
         }
     }
@@ -206,32 +210,47 @@ fn create_inter_isd_links(net: &mut Net, topology: &Topology) -> Result<(), Netw
 
     net.add_link(isd1.cores[0].0, isd2.cores[0].0)?;
     net.configure_scion_link(isd1.cores[0].0, isd2.cores[0].0, ScionLinkType::Core)?;
-    println!("  ✓ ISD 1-{} ↔ ISD 2-{}",
-             extract_asn(&isd1.cores[0].1), extract_asn(&isd2.cores[0].1));
+    println!(
+        "  ✓ ISD 1-{} ↔ ISD 2-{}",
+        extract_asn(&isd1.cores[0].1),
+        extract_asn(&isd2.cores[0].1)
+    );
 
     net.add_link(isd1.cores[1].0, isd2.cores[1].0)?;
     net.configure_scion_link(isd1.cores[1].0, isd2.cores[1].0, ScionLinkType::Core)?;
-    println!("  ✓ ISD 1-{} ↔ ISD 2-{}",
-             extract_asn(&isd1.cores[1].1), extract_asn(&isd2.cores[1].1));
+    println!(
+        "  ✓ ISD 1-{} ↔ ISD 2-{}",
+        extract_asn(&isd1.cores[1].1),
+        extract_asn(&isd2.cores[1].1)
+    );
 
     // ISD 2 <-> ISD 3: 2 core links
     let isd3 = &topology.isds[&3];
 
     net.add_link(isd2.cores[0].0, isd3.cores[0].0)?;
     net.configure_scion_link(isd2.cores[0].0, isd3.cores[0].0, ScionLinkType::Core)?;
-    println!("  ✓ ISD 2-{} ↔ ISD 3-{}",
-             extract_asn(&isd2.cores[0].1), extract_asn(&isd3.cores[0].1));
+    println!(
+        "  ✓ ISD 2-{} ↔ ISD 3-{}",
+        extract_asn(&isd2.cores[0].1),
+        extract_asn(&isd3.cores[0].1)
+    );
 
     net.add_link(isd2.cores[2].0, isd3.cores[1].0)?;
     net.configure_scion_link(isd2.cores[2].0, isd3.cores[1].0, ScionLinkType::Core)?;
-    println!("  ✓ ISD 2-{} ↔ ISD 3-{}",
-             extract_asn(&isd2.cores[2].1), extract_asn(&isd3.cores[1].1));
+    println!(
+        "  ✓ ISD 2-{} ↔ ISD 3-{}",
+        extract_asn(&isd2.cores[2].1),
+        extract_asn(&isd3.cores[1].1)
+    );
 
     // ISD 1 <-> ISD 3: 1 core link
     net.add_link(isd1.cores[2].0, isd3.cores[0].0)?;
     net.configure_scion_link(isd1.cores[2].0, isd3.cores[0].0, ScionLinkType::Core)?;
-    println!("  ✓ ISD 1-{} ↔ ISD 3-{}",
-             extract_asn(&isd1.cores[2].1), extract_asn(&isd3.cores[0].1));
+    println!(
+        "  ✓ ISD 1-{} ↔ ISD 3-{}",
+        extract_asn(&isd1.cores[2].1),
+        extract_asn(&isd3.cores[0].1)
+    );
 
     Ok(())
 }
@@ -253,8 +272,10 @@ fn print_topology(topology: &Topology) {
             println!("  └─ {} Core ASes", isd.cores.len());
             println!("  └─ {} Transit ASes", isd.transits.len());
             println!("  └─ {} Leaf ASes", isd.leaves.len());
-            println!("  └─ Total: {} ASes\n",
-                     isd.cores.len() + isd.transits.len() + isd.leaves.len());
+            println!(
+                "  └─ Total: {} ASes\n",
+                isd.cores.len() + isd.transits.len() + isd.leaves.len()
+            );
 
             total_cores += isd.cores.len();
             total_transits += isd.transits.len();
@@ -266,7 +287,10 @@ fn print_topology(topology: &Topology) {
     println!("  └─ {} Core ASes", total_cores);
     println!("  └─ {} Transit ASes", total_transits);
     println!("  └─ {} Leaf ASes", total_leaves);
-    println!("  └─ {} Total ASes", total_cores + total_transits + total_leaves);
+    println!(
+        "  └─ {} Total ASes",
+        total_cores + total_transits + total_leaves
+    );
     println!("  └─ 5 Inter-ISD core links\n");
 }
 
@@ -282,38 +306,72 @@ fn get_region_name(isd: u16) -> &'static str {
 fn run_beaconing_with_stats(net: &mut Net) -> Result<(), NetworkError> {
     println!("═══ Running Beaconing ═══\n");
 
-    let mut timestamp = 1000u32;
-    let mut total_core_pcbs = 0;
-    let mut total_intra_pcbs = 0;
+    // Choose mode: Use environment variable or default to event-driven
+    let use_event_driven = std::env::var("SCION_BATCH_MODE").is_err();
 
-    // Need 3 rounds for 3-ISD topology
-    let rounds = 3;
-    let intra_rounds_per_iter = 3; // Depth: core → transit → leaf
+    if use_event_driven {
+        println!("Mode: EVENT-DRIVEN (new)");
+        println!("  (set SCION_BATCH_MODE=1 to use old batch mode)\n");
 
-    for round in 1..=rounds {
-        println!("Round {}:", round);
+        let start = std::time::Instant::now();
+        let core_count = net.scion_start_beaconing(1000)?;
+        let events_processed = net.scion_converge()?;
+        let elapsed = start.elapsed();
 
-        // Core beaconing
-        let core_pcbs = net.scion_core_beaconing(timestamp)?;
-        total_core_pcbs += core_pcbs;
-        println!("  ├─ Core beaconing: {} PCBs created", core_pcbs);
-        timestamp += 1;
+        println!("Beaconing Summary (Event-Driven):");
+        println!("  ├─ Core ASes: {}", core_count);
+        println!("  ├─ Events processed: {}", events_processed);
+        println!("  ├─ Time: {:.3}s", elapsed.as_secs_f64());
 
-        // Intra-ISD beaconing (multiple rounds to reach leaves)
-        for sub_round in 1..=intra_rounds_per_iter {
-            let intra_pcbs = net.scion_intra_isd_beaconing(timestamp, 50)?;
-            total_intra_pcbs += intra_pcbs;
-            println!("  ├─ Intra-ISD sub-round {}: {} PCBs propagated",
-                     sub_round, intra_pcbs);
-            timestamp += 1;
+        // Count total PCBs
+        let mut total_pcbs = 0;
+        for router_id in net.indices() {
+            if let Ok(bs) = net.get_scion_beacon_store(router_id) {
+                total_pcbs += bs.total_count();
+            }
         }
-        println!("  └─ Round {} complete\n", round);
-    }
+        println!("  └─ Total PCBs stored: {}\n", total_pcbs);
+    } else {
+        println!("Mode: BATCH (legacy)\n");
 
-    println!("Beaconing Summary:");
-    println!("  ├─ Total core PCBs: {}", total_core_pcbs);
-    println!("  ├─ Total intra-ISD PCBs: {}", total_intra_pcbs);
-    println!("  └─ Total PCBs: {}\n", total_core_pcbs + total_intra_pcbs);
+        let mut timestamp = 1000u32;
+        let mut total_core_pcbs = 0;
+        let mut total_intra_pcbs = 0;
+
+        // Need 3 rounds for 3-ISD topology
+        let rounds = 3;
+        let intra_rounds_per_iter = 3; // Depth: core → transit → leaf
+
+        let start = std::time::Instant::now();
+        for round in 1..=rounds {
+            println!("Round {}:", round);
+
+            // Core beaconing
+            let core_pcbs = net.scion_core_beaconing(timestamp)?;
+            total_core_pcbs += core_pcbs;
+            println!("  ├─ Core beaconing: {} PCBs created", core_pcbs);
+            timestamp += 1;
+
+            // Intra-ISD beaconing (multiple rounds to reach leaves)
+            for sub_round in 1..=intra_rounds_per_iter {
+                let intra_pcbs = net.scion_intra_isd_beaconing(timestamp, 50)?;
+                total_intra_pcbs += intra_pcbs;
+                println!(
+                    "  ├─ Intra-ISD sub-round {}: {} PCBs propagated",
+                    sub_round, intra_pcbs
+                );
+                timestamp += 1;
+            }
+            println!("  └─ Round {} complete\n", round);
+        }
+        let elapsed = start.elapsed();
+
+        println!("Beaconing Summary (Batch Mode):");
+        println!("  ├─ Total core PCBs: {}", total_core_pcbs);
+        println!("  ├─ Total intra-ISD PCBs: {}", total_intra_pcbs);
+        println!("  ├─ Total PCBs: {}", total_core_pcbs + total_intra_pcbs);
+        println!("  └─ Time: {:.3}s\n", elapsed.as_secs_f64());
+    }
 
     Ok(())
 }
@@ -377,7 +435,10 @@ fn demonstrate_path_lookups(net: &Net, topology: &Topology) -> Result<(), Networ
     Ok(())
 }
 
-fn print_segment_details(segments: &bgpsim::scion_network::PathSegments<SimplePrefix>, label: &str) {
+fn print_segment_details(
+    segments: &bgpsim::scion_network::PathSegments<SimplePrefix>,
+    label: &str,
+) {
     println!("  ┌─ {} Path Segments:", label);
     println!("  ├─ Up segments:   {}", segments.up_segments.len());
     println!("  ├─ Core segments: {}", segments.core_segments.len());
@@ -386,26 +447,44 @@ fn print_segment_details(segments: &bgpsim::scion_network::PathSegments<SimplePr
     // Show example segments
     if !segments.up_segments.is_empty() {
         let seg = &segments.up_segments[0];
-        let path_str: Vec<String> = seg.as_path.iter()
+        let path_str: Vec<String> = seg
+            .as_path
+            .iter()
             .map(|hop| format!("{}-{}", hop.isd, hop.asn))
             .collect();
-        println!("     Example up:   {} hops: {}", seg.as_path.len(), path_str.join(" → "));
+        println!(
+            "     Example up:   {} hops: {}",
+            seg.as_path.len(),
+            path_str.join(" → ")
+        );
     }
 
     if !segments.core_segments.is_empty() {
         let seg = &segments.core_segments[0];
-        let path_str: Vec<String> = seg.as_path.iter()
+        let path_str: Vec<String> = seg
+            .as_path
+            .iter()
             .map(|hop| format!("{}-{}", hop.isd, hop.asn))
             .collect();
-        println!("     Example core: {} hops: {}", seg.as_path.len(), path_str.join(" → "));
+        println!(
+            "     Example core: {} hops: {}",
+            seg.as_path.len(),
+            path_str.join(" → ")
+        );
     }
 
     if !segments.down_segments.is_empty() {
         let seg = &segments.down_segments[0];
-        let path_str: Vec<String> = seg.as_path.iter()
+        let path_str: Vec<String> = seg
+            .as_path
+            .iter()
             .map(|hop| format!("{}-{}", hop.isd, hop.asn))
             .collect();
-        println!("     Example down: {} hops: {}", seg.as_path.len(), path_str.join(" → "));
+        println!(
+            "     Example down: {} hops: {}",
+            seg.as_path.len(),
+            path_str.join(" → ")
+        );
     }
 }
 
@@ -417,8 +496,10 @@ fn show_path_construction_potential(segments: &bgpsim::scion_network::PathSegmen
     let potential_paths = up_count * core_count * down_count;
 
     println!("  ┌─ Path Construction Potential:");
-    println!("  ├─ Segment combinations: {} × {} × {} = {} possible paths",
-             up_count, core_count, down_count, potential_paths);
+    println!(
+        "  ├─ Segment combinations: {} × {} × {} = {} possible paths",
+        up_count, core_count, down_count, potential_paths
+    );
     println!("  └─ Note: Endhost constructs paths from these segments");
 }
 
@@ -447,12 +528,26 @@ fn print_final_statistics(net: &Net, topology: &Topology) -> Result<(), NetworkE
 
     println!("\nTopology Structure:");
     println!("  ├─ {} ISDs", topology.isds.len());
-    println!("  ├─ {} core ASes across all ISDs",
-             topology.isds.values().map(|i| i.cores.len()).sum::<usize>());
-    println!("  ├─ {} transit ASes",
-             topology.isds.values().map(|i| i.transits.len()).sum::<usize>());
-    println!("  └─ {} leaf ASes",
-             topology.isds.values().map(|i| i.leaves.len()).sum::<usize>());
+    println!(
+        "  ├─ {} core ASes across all ISDs",
+        topology.isds.values().map(|i| i.cores.len()).sum::<usize>()
+    );
+    println!(
+        "  ├─ {} transit ASes",
+        topology
+            .isds
+            .values()
+            .map(|i| i.transits.len())
+            .sum::<usize>()
+    );
+    println!(
+        "  └─ {} leaf ASes",
+        topology
+            .isds
+            .values()
+            .map(|i| i.leaves.len())
+            .sum::<usize>()
+    );
 
     println!("\nKey Features Demonstrated:");
     println!("  ✓ Multi-ISD hierarchical topology");

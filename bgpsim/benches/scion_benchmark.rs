@@ -15,20 +15,23 @@
 
 //! Benchmarks for SCION control plane operations
 
-use bgpsim::prelude::*;
 use bgpsim::event::BasicEventQueue;
 use bgpsim::ospf::GlobalOspf;
+use bgpsim::prelude::*;
 use bgpsim::scion::{IsdAs, ScionLinkType};
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 /// Create a simple core network with N core ASes in a ring topology
-fn create_core_network(n: usize) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
+fn create_core_network(
+    n: usize,
+) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
     let mut net: Network<SimplePrefix, BasicEventQueue<_>, GlobalOspf> = Network::default();
 
     let mut cores = Vec::new();
     for i in 0..n {
         let router = net.add_router(&format!("Core{}", i), 65500 + i as u32);
-        net.enable_scion(router, IsdAs::new(1, (110 + i) as u64), true).unwrap();
+        net.enable_scion(router, IsdAs::new(1, (110 + i) as u64), true)
+            .unwrap();
         cores.push(router);
     }
 
@@ -36,14 +39,17 @@ fn create_core_network(n: usize) -> Network<SimplePrefix, BasicEventQueue<Simple
     for i in 0..n {
         let next = (i + 1) % n;
         net.add_link(cores[i], cores[next]).unwrap();
-        net.configure_scion_link(cores[i], cores[next], ScionLinkType::Core).unwrap();
+        net.configure_scion_link(cores[i], cores[next], ScionLinkType::Core)
+            .unwrap();
     }
 
     net
 }
 
 /// Create a hierarchical network: 1 core with N non-core ASes
-fn create_hierarchical_network(n_children: usize) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
+fn create_hierarchical_network(
+    n_children: usize,
+) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
     let mut net: Network<SimplePrefix, BasicEventQueue<_>, GlobalOspf> = Network::default();
 
     let core = net.add_router("Core", 65500);
@@ -51,29 +57,39 @@ fn create_hierarchical_network(n_children: usize) -> Network<SimplePrefix, Basic
 
     for i in 0..n_children {
         let child = net.add_router(&format!("AS{}", i), 65501 + i as u32);
-        net.enable_scion(child, IsdAs::new(1, (111 + i) as u64), false).unwrap();
+        net.enable_scion(child, IsdAs::new(1, (111 + i) as u64), false)
+            .unwrap();
         net.add_link(core, child).unwrap();
-        net.configure_scion_link(core, child, ScionLinkType::ParentChild).unwrap();
+        net.configure_scion_link(core, child, ScionLinkType::ParentChild)
+            .unwrap();
     }
 
     net
 }
 
 /// Create a multi-ISD network
-fn create_multi_isd_network(n_isds: usize) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
+fn create_multi_isd_network(
+    n_isds: usize,
+) -> Network<SimplePrefix, BasicEventQueue<SimplePrefix>, GlobalOspf> {
     let mut net: Network<SimplePrefix, BasicEventQueue<_>, GlobalOspf> = Network::default();
 
     let mut cores = Vec::new();
     for i in 0..n_isds {
         let core = net.add_router(&format!("Core{}", i), 65500 + i as u32);
-        net.enable_scion(core, IsdAs::new((i + 1) as u16, ((i + 1) * 110) as u64), true).unwrap();
+        net.enable_scion(
+            core,
+            IsdAs::new((i + 1) as u16, ((i + 1) * 110) as u64),
+            true,
+        )
+        .unwrap();
         cores.push(core);
     }
 
     // Connect ISDs in a chain
     for i in 0..(n_isds - 1) {
         net.add_link(cores[i], cores[i + 1]).unwrap();
-        net.configure_scion_link(cores[i], cores[i + 1], ScionLinkType::Core).unwrap();
+        net.configure_scion_link(cores[i], cores[i + 1], ScionLinkType::Core)
+            .unwrap();
     }
 
     net
@@ -155,7 +171,8 @@ fn benchmark_intra_isd_lookup(c: &mut Criterion) {
                     net.scion_registration_round(5).unwrap();
 
                     // Get source and destination routers
-                    let routers: Vec<_> = net.routers()
+                    let routers: Vec<_> = net
+                        .routers()
                         .filter(|r| r.scion().map(|cs| !cs.is_core).unwrap_or(false))
                         .map(|r| r.router_id())
                         .collect();
@@ -185,9 +202,7 @@ fn benchmark_inter_isd_lookup(c: &mut Criterion) {
                     net.scion_registration_round(5).unwrap();
 
                     // Get first and last core routers
-                    let routers: Vec<_> = net.routers()
-                        .map(|r| r.router_id())
-                        .collect();
+                    let routers: Vec<_> = net.routers().map(|r| r.router_id()).collect();
 
                     (net, routers[0], routers[routers.len() - 1])
                 },
@@ -215,13 +230,15 @@ fn benchmark_complete_workflow(c: &mut Criterion) {
                     net.scion_registration_round(5).unwrap();
 
                     // Get source and destination
-                    let routers: Vec<_> = net.routers()
+                    let routers: Vec<_> = net
+                        .routers()
                         .filter(|r| r.scion().map(|cs| !cs.is_core).unwrap_or(false))
                         .map(|r| r.router_id())
                         .collect();
 
                     if routers.len() >= 2 {
-                        net.scion_lookup_paths(routers[0], routers[routers.len() - 1]).unwrap();
+                        net.scion_lookup_paths(routers[0], routers[routers.len() - 1])
+                            .unwrap();
                     }
                 },
                 criterion::BatchSize::SmallInput,

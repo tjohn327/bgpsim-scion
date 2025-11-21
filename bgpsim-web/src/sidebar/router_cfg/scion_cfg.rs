@@ -83,16 +83,28 @@ impl Component for ScionCfg {
 
         // Use direct dispatch callbacks to avoid re-entrant borrow issues
         let on_toggle_enabled = self.net_dispatch.reduce_mut_callback(move |n| {
-            let enabled = n.net().get_router(router).ok().and_then(|r| r.scion()).is_none();
+            let enabled = n
+                .net()
+                .get_router(router)
+                .ok()
+                .and_then(|r| r.scion())
+                .is_none();
             if enabled {
-                let _ = n.net_mut().enable_scion(router, IsdAs::new(IsdNumber(1), 1u64), false);
+                let _ = n
+                    .net_mut()
+                    .enable_scion(router, IsdAs::new(IsdNumber(1), 1u64), false);
             } else {
                 let _ = n.net_mut().disable_scion(router);
             }
         });
 
         let on_toggle_core = self.net_dispatch.reduce_mut_callback(move |n| {
-            if let Some((isd_as, is_core)) = n.net().get_router(router).ok().and_then(|r| r.scion().map(|cs| (cs.isd_as, cs.is_core))) {
+            if let Some((isd_as, is_core)) = n
+                .net()
+                .get_router(router)
+                .ok()
+                .and_then(|r| r.scion().map(|cs| (cs.isd_as, cs.is_core)))
+            {
                 let _ = n.net_mut().disable_scion(router);
                 let _ = n.net_mut().enable_scion(router, isd_as, !is_core);
             }

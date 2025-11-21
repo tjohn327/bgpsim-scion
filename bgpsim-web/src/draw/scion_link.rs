@@ -50,9 +50,8 @@ pub fn ScionLink(props: &ScionLinkProps) -> Html {
     let state = Dispatch::<State>::new();
     let src = props.src;
     let dst = props.dst;
-    let on_mouse_enter = state.reduce_mut_callback(move |s| {
-        s.set_hover(Hover::ScionLink(src, dst))
-    });
+    let on_mouse_enter =
+        state.reduce_mut_callback(move |s| s.set_hover(Hover::ScionLink(src, dst)));
     let on_mouse_leave = state.reduce_mut_callback(|s| s.clear_hover());
 
     html! {
