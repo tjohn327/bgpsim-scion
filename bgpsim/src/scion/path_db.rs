@@ -357,6 +357,15 @@ impl PathDatabase {
         self.core_by_pair.clear();
     }
 
+    /// Get segment counts by type (up, down, core)
+    pub fn segment_counts(&self) -> (usize, usize, usize) {
+        (
+            self.up_segments.len(),
+            self.down_segments.len(),
+            self.core_segments.len(),
+        )
+    }
+
     /// Remove segments older than a given timestamp
     pub fn remove_expired(&mut self, min_timestamp: i64) -> usize {
         let mut removed = 0;

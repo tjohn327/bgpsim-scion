@@ -127,7 +127,6 @@ mod test_serde;
 mod test_scion_phase2;
 mod test_scion_phase3;
 mod test_scion_phase4;
-// Phase 5 integration tests removed - see path_construction module tests instead
-// mod test_scion_phase5;
+mod test_scion_example;
 #[cfg(feature = "topology_zoo")]
 mod test_topology_zoo;

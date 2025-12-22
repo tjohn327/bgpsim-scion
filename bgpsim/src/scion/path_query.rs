@@ -231,7 +231,12 @@ impl ScionPath {
 
         for (i, seg_ref) in self.segments.iter().enumerate() {
             let seg = seg_ref.segment();
-            let as_path = seg.as_path();
+            let mut as_path = seg.as_path();
+
+            // UP segments are traversed in reverse of their PCB direction
+            if matches!(seg_ref, PathSegmentRef::Up(_)) {
+                as_path.reverse();
+            }
 
             if i == 0 {
                 // First segment: include all ASes
@@ -308,13 +313,26 @@ impl ScionPath {
             }
         }
 
+        // Helper to get logical src/dst accounting for segment directionality
+        // UP segments: traversed in reverse (non-core -> core)
+        // DOWN/CORE segments: traversed forward (src -> dst)
+        let logical_src = |seg_ref: &PathSegmentRef| -> Option<IsdAs> {
+            match seg_ref {
+                PathSegmentRef::Up(seg) => seg.dst(), // Reversed
+                _ => seg_ref.segment().src(),
+            }
+        };
+        let logical_dst = |seg_ref: &PathSegmentRef| -> Option<IsdAs> {
+            match seg_ref {
+                PathSegmentRef::Up(seg) => seg.src(), // Reversed
+                _ => seg_ref.segment().dst(),
+            }
+        };
+
         // Check that segments connect properly
         for i in 0..self.segments.len() - 1 {
-            let seg1 = self.segments[i].segment();
-            let seg2 = self.segments[i + 1].segment();
-
-            let seg1_dst = seg1.dst().ok_or("Segment has no destination")?;
-            let seg2_src = seg2.src().ok_or("Segment has no source")?;
+            let seg1_dst = logical_dst(&self.segments[i]).ok_or("Segment has no destination")?;
+            let seg2_src = logical_src(&self.segments[i + 1]).ok_or("Segment has no source")?;
 
             if seg1_dst != seg2_src {
                 return Err(format!(
@@ -325,8 +343,7 @@ impl ScionPath {
         }
 
         // Check that first segment starts at source
-        let first_seg = self.segments[0].segment();
-        let first_src = first_seg.src().ok_or("First segment has no source")?;
+        let first_src = logical_src(&self.segments[0]).ok_or("First segment has no source")?;
         if first_src != self.src {
             return Err(format!(
                 "Path source mismatch: expected {}, got {}",
@@ -335,8 +352,7 @@ impl ScionPath {
         }
 
         // Check that last segment ends at destination
-        let last_seg = self.segments.last().unwrap().segment();
-        let last_dst = last_seg.dst().ok_or("Last segment has no destination")?;
+        let last_dst = logical_dst(self.segments.last().unwrap()).ok_or("Last segment has no destination")?;
         if last_dst != self.dst {
             return Err(format!(
                 "Path destination mismatch: expected {}, got {}",
@@ -409,14 +425,23 @@ mod tests {
     use crate::scion::pcb::{AsEntry, HopEntry, Pcb};
 
     fn create_test_segment(seg_type: SegmentType, src: IsdAs, dst: IsdAs) -> Arc<PathSegment> {
-        let mut pcb = Pcb::new(src);
+        // For UP segments: PCB is in beaconing direction (core->non-core)
+        // So we need to reverse src/dst for the PCB construction
+        // For DOWN/CORE: PCB matches routing direction
+        let (pcb_start, pcb_end) = if seg_type == SegmentType::Up {
+            (dst, src) // Reversed: core first, then non-core
+        } else {
+            (src, dst) // Normal: src first, then dst
+        };
+
+        let mut pcb = Pcb::new(pcb_start);
         pcb.extend(AsEntry::new(
-            src,
-            Some(dst),
+            pcb_start,
+            Some(pcb_end),
             HopEntry::new(InterfaceId::ZERO, Some(InterfaceId::new(1))),
         ));
         pcb.extend(AsEntry::new(
-            dst,
+            pcb_end,
             None,
             HopEntry::new(InterfaceId::new(1), None),
         ));
