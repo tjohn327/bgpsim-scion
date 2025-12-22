@@ -733,6 +733,48 @@ impl ScionControlService {
         // Must equal our ISD-AS
         first_as == Some(self.isd_as)
     }
+
+    /// Query for paths to a destination AS
+    ///
+    /// §5: Path lookup combines up, core, and down segments to create
+    /// end-to-end paths. Optionally includes peering shortcuts.
+    ///
+    /// This method constructs paths from this AS to the destination AS
+    /// by combining segments from the path database.
+    pub fn query_paths(
+        &self,
+        dst: IsdAs,
+        max_paths: usize,
+        allow_peering: bool,
+    ) -> super::path_query::PathQueryResult {
+        use super::path_construction::construct_paths_with_peering;
+        use super::path_query::PathQuery;
+
+        let query = PathQuery {
+            src: self.isd_as,
+            dst,
+            max_paths,
+            allow_peering,
+        };
+
+        // Use path construction algorithm
+        construct_paths_with_peering(&query, &self.path_db, self.is_core, false)
+        // Note: We assume dst_is_core=false for simplicity
+        // In a full implementation, we'd need to track which ASes are core
+    }
+
+    /// Query for paths with a full PathQuery object
+    ///
+    /// This is a more flexible version of query_paths that accepts
+    /// a pre-built PathQuery object.
+    pub fn query_paths_full(
+        &self,
+        query: &super::path_query::PathQuery,
+    ) -> super::path_query::PathQueryResult {
+        use super::path_construction::construct_paths_with_peering;
+
+        construct_paths_with_peering(query, &self.path_db, self.is_core, false)
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,10 @@ pub mod pcb;
 pub mod beacon_store;
 /// Path database for registered path segments
 pub mod path_db;
+/// Path query and construction
+pub mod path_query;
+/// Path construction algorithms
+pub mod path_construction;
 /// SCION control plane events
 pub mod event;
 /// SCION control service (AS-level coordinator)
@@ -29,5 +33,7 @@ pub use types::*;
 pub use pcb::*;
 pub use beacon_store::*;
 pub use path_db::*;
+pub use path_query::*;
+pub use path_construction::*;
 pub use event::*;
 pub use control_service::*;

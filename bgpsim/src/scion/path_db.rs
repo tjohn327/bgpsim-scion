@@ -297,6 +297,54 @@ impl PathDatabase {
         self.total_segments() == 0
     }
 
+    /// Get all up segments originating from a specific source AS
+    ///
+    /// This returns up segments where the source AS is the starting point.
+    /// Note: In SCION, up segments go from non-core to core, so this finds
+    /// segments starting at the given non-core AS.
+    pub fn get_up_from(&self, src: IsdAs) -> Vec<Arc<PathSegment>> {
+        self.up_segments
+            .iter()
+            .filter(|seg| seg.dst() == Some(src))
+            .cloned()
+            .collect()
+    }
+
+    /// Get down segments from a specific core to a specific destination
+    ///
+    /// This is more specific than get_down_from, filtering by both src and dst.
+    pub fn get_down_from_to(&self, core: IsdAs, dst: IsdAs) -> Vec<Arc<PathSegment>> {
+        self.down_by_src
+            .get(&core)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(|&idx| self.down_segments.get(idx))
+                    .filter(|seg| seg.dst() == Some(dst))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get core segments from source to any AS in destination ISD
+    ///
+    /// This is useful for inter-ISD routing where we need to reach any core
+    /// in the destination ISD.
+    pub fn get_core_to_isd(&self, src: IsdAs, dst_isd: u16) -> Vec<Arc<PathSegment>> {
+        self.core_by_src
+            .get(&src)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(|&idx| self.core_segments.get(idx))
+                    .filter(|seg| seg.dst().map(|d| d.isd.0) == Some(dst_isd))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Clear all segments from the database
     pub fn clear(&mut self) {
         self.up_segments.clear();
