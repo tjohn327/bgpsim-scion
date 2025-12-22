@@ -182,8 +182,10 @@ impl PathDatabase {
         match segment.segment_type {
             SegmentType::Up => {
                 let idx = self.up_segments.len();
-                if let Some(dst) = segment.dst() {
-                    self.up_by_dst.entry(dst).or_default().push(idx);
+                // Up segments: PCB is [core -> non-core (term)]
+                // We index by src (the core AS we can reach)
+                if let Some(src) = segment.src() {
+                    self.up_by_dst.entry(src).or_default().push(idx);
                 }
                 self.up_segments.push(segment);
             }
@@ -527,18 +529,20 @@ mod tests {
     fn test_get_up_to() {
         let mut db = PathDatabase::new();
 
-        let dst1 = IsdAs::new(1, 200);
-        let dst2 = IsdAs::new(1, 201);
+        let core1 = IsdAs::new(1, 200);
+        let core2 = IsdAs::new(1, 201);
 
-        db.add_segment(create_test_segment(SegmentType::Up, IsdAs::new(1, 100), dst1, 0));
-        db.add_segment(create_test_segment(SegmentType::Up, IsdAs::new(1, 101), dst1, 0));
-        db.add_segment(create_test_segment(SegmentType::Up, IsdAs::new(1, 102), dst2, 0));
+        // Up segments: PCB is [core -> non-core (term)]
+        // We query by core AS (src of PCB)
+        db.add_segment(create_test_segment(SegmentType::Up, core1, IsdAs::new(1, 100), 0));
+        db.add_segment(create_test_segment(SegmentType::Up, core1, IsdAs::new(1, 101), 0));
+        db.add_segment(create_test_segment(SegmentType::Up, core2, IsdAs::new(1, 102), 0));
 
-        let to_dst1 = db.get_up_to(dst1);
-        assert_eq!(to_dst1.len(), 2);
+        let to_core1 = db.get_up_to(core1);
+        assert_eq!(to_core1.len(), 2);
 
-        let to_dst2 = db.get_up_to(dst2);
-        assert_eq!(to_dst2.len(), 1);
+        let to_core2 = db.get_up_to(core2);
+        assert_eq!(to_core2.len(), 1);
 
         let to_nonexistent = db.get_up_to(IsdAs::new(1, 999));
         assert_eq!(to_nonexistent.len(), 0);

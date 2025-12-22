@@ -135,37 +135,49 @@ fn test_handle_beacon_batch_event() {
 fn test_handle_segment_registration_event() {
     let mut net: Network<SimplePrefix, _> = Network::default();
 
-    // Setup network
+    // Setup core AS and non-core AS
     let r1 = net.add_router("r1", 65100);
-    let isd_as = IsdAs::new(1, 100);
-    net.enable_scion_router(r1, isd_as, true).unwrap();
+    let r2 = net.add_router("r2", 65101);
+    net.add_link(r1, r2).unwrap();
 
-    // Create a path segment
-    let mut pcb = Pcb::new(isd_as);
-    let entry = AsEntry::new(
-        isd_as,
-        None,
-        HopEntry::new(InterfaceId::ZERO, None),
-    );
-    pcb.extend(entry);
+    let core_as = IsdAs::new(1, 100);
+    let child_as = IsdAs::new(1, 101);
 
-    let segment = PathSegment::new(SegmentType::Up, pcb);
+    net.enable_scion_router(r1, core_as, true).unwrap(); // Core
+    net.enable_scion_router(r2, child_as, false).unwrap(); // Non-core
+    net.add_scion_link(r1, r2, ScionLinkType::Child).unwrap();
+
+    // Create a down segment (from core to child, being registered at core)
+    // §4.1.3: First AS entry must equal core AS where registering
+    let mut pcb = Pcb::new(core_as);
+    pcb.extend(AsEntry::new(
+        core_as,
+        Some(child_as),
+        HopEntry::new(InterfaceId::ZERO, Some(InterfaceId::new(1))),
+    ));
+    pcb.extend(AsEntry::new(
+        child_as,
+        None, // Terminated
+        HopEntry::new(InterfaceId::new(1), None),
+    ));
+
+    let segment = PathSegment::new(SegmentType::Down, pcb);
     let segment = Arc::new(segment);
 
-    // Create SegmentRegistration event
+    // Create SegmentRegistration event (child registering down segment at core)
     let event = ScionEvent::SegmentRegistration {
         segments: vec![segment.clone()],
-        segment_type: SegmentType::Up,
+        segment_type: SegmentType::Down,
     };
 
-    let scion_event = Event::scion((), isd_as, isd_as, event);
+    let scion_event = Event::scion((), child_as, core_as, event);
 
-    // Process event
+    // Process event at core AS
     let result = net.handle_scion_event(scion_event);
     assert!(result.is_ok());
 
-    // Verify segment was stored
-    let cs = &net.scion_services[&isd_as];
+    // Verify segment was stored at core AS
+    let cs = &net.scion_services[&core_as];
     let stored_segments = cs.path_db.get_all();
     assert_eq!(stored_segments.len(), 1);
 

@@ -1240,10 +1240,25 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
                         Ok((StepUpdate::Unchanged, vec![]))
                     }
 
-                    ScionEvent::SegmentRegistration { segments, segment_type: _ } => {
-                        // Store path segments in path database
-                        for segment in segments {
-                            control_service.path_db.add_segment(segment);
+                    ScionEvent::SegmentRegistration { segments, segment_type } => {
+                        use crate::scion::SegmentType;
+
+                        match segment_type {
+                            SegmentType::Down => {
+                                // Validate and store down segments
+                                // §4.1.3: First AS entry must match core AS
+                                for segment in segments {
+                                    if control_service.validate_down_segment(&segment) {
+                                        control_service.path_db.add_segment(segment);
+                                    }
+                                    // Invalid segments silently dropped
+                                }
+                            }
+
+                            SegmentType::Up | SegmentType::Core => {
+                                // Should not receive these via events (local storage only)
+                                // Up and Core segments are stored locally by the originating AS
+                            }
                         }
 
                         Ok((StepUpdate::Unchanged, vec![]))
@@ -1303,13 +1318,38 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
                     }
 
                     ScionEvent::RegistrationTimeout => {
-                        // TODO: Implement segment registration in Phase 4
-                        // This will:
-                        // 1. Select segments for registration
-                        // 2. Send to path servers
-                        // 3. Re-enqueue next timeout
+                        use crate::scion::SegmentType;
 
-                        Ok((StepUpdate::Unchanged, vec![]))
+                        let mut new_events = Vec::new();
+
+                        if !control_service.is_core {
+                            // Non-core AS: register both up and down segments
+
+                            // 1. Register up segments (local storage)
+                            control_service.register_up_segments();
+
+                            // 2. Register down segments (send to core ASes)
+                            let batches = control_service.register_down_segments();
+
+                            for (core_as, segments) in batches {
+                                new_events.push(Event::scion(
+                                    T::default(),
+                                    dst, // Source is this AS
+                                    core_as, // Destination is core AS
+                                    ScionEvent::SegmentRegistration {
+                                        segments,
+                                        segment_type: SegmentType::Down,
+                                    },
+                                ));
+                            }
+                        } else {
+                            // Core AS: register core segments (local storage only)
+                            control_service.register_core_segments();
+                        }
+
+                        // TODO: Schedule next RegistrationTimeout (Phase 5)
+
+                        Ok((StepUpdate::Unchanged, new_events))
                     }
                 }
             }

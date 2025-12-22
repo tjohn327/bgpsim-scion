@@ -564,6 +564,175 @@ impl ScionControlService {
 
         batches
     }
+
+    // ===== PCB Termination and Segment Registration (§4) =====
+
+    /// Terminate a PCB by adding a final AS entry
+    ///
+    /// §4.1.1: Termination converts a traveling PCB into a static path segment.
+    /// The final AS entry MUST have:
+    /// - next_isd_as = None (MUST NOT be specified)
+    /// - egress = None in hop field (MUST NOT be specified)
+    ///
+    /// # Arguments
+    /// * `pcb` - The PCB to terminate
+    /// * `segment_type` - The type of segment being created (Up/Down/Core)
+    fn terminate_pcb(
+        &self,
+        pcb: std::sync::Arc<super::pcb::Pcb>,
+        segment_type: super::path_db::SegmentType,
+    ) -> std::sync::Arc<super::path_db::PathSegment> {
+        use super::pcb::{AsEntry, HopEntry};
+
+        let mut new_pcb = (*pcb).clone();
+
+        // Determine ingress interface (where the PCB entered this AS)
+        let ingress_iface = self
+            .get_ingress_interface(&pcb)
+            .unwrap_or(InterfaceId::ZERO);
+
+        // Create terminal hop entry (no egress)
+        let hop_entry = HopEntry::new(
+            ingress_iface,
+            None, // No egress - this is the end
+        );
+
+        // Create terminal AS entry (no next_isd_as)
+        let as_entry = AsEntry::new(
+            self.isd_as,
+            None, // No next AS - this is the end
+            hop_entry,
+        );
+
+        // Note: Peer entries could be added here in the future (§4.1.1)
+        // for peer in self.get_configured_peers() {
+        //     as_entry.add_peer_entry(peer);
+        // }
+
+        new_pcb.extend(as_entry);
+
+        // Create path segment
+        std::sync::Arc::new(super::path_db::PathSegment::new(segment_type, new_pcb))
+    }
+
+    /// Register up segments (non-core AS only)
+    ///
+    /// §4.1.2: Non-core ASes transform selected PCBs into up segments and store
+    /// them locally in their path database.
+    ///
+    /// Returns the registered segments for inspection/testing.
+    pub fn register_up_segments(&mut self) -> Vec<std::sync::Arc<super::path_db::PathSegment>> {
+        use super::path_db::SegmentType;
+
+        if self.is_core {
+            return vec![]; // Core ASes don't register up segments
+        }
+
+        // Select best PCBs to transform into up segments
+        // Typical: ~20 up segments per AS
+        let pcbs = self.select_best_pcbs(20);
+
+        let mut segments = Vec::new();
+
+        for pcb in pcbs {
+            // Terminate PCB as up segment
+            let segment = self.terminate_pcb(pcb, SegmentType::Up);
+
+            // Store in local path database
+            self.path_db.add_segment(segment.clone());
+
+            segments.push(segment);
+        }
+
+        segments
+    }
+
+    /// Register down segments (non-core AS only)
+    ///
+    /// §4.1.3: Non-core ASes transform selected PCBs into down segments and
+    /// register them with the originating core ASes.
+    ///
+    /// Returns (core_as, segments) tuples for creating SegmentRegistration events.
+    pub fn register_down_segments(
+        &mut self,
+    ) -> Vec<(IsdAs, Vec<std::sync::Arc<super::path_db::PathSegment>>)> {
+        use super::path_db::SegmentType;
+        use std::collections::HashMap;
+
+        if self.is_core {
+            return vec![]; // Core ASes don't register down segments
+        }
+
+        // Select best PCBs to transform into down segments
+        // Typical: ~20 down segments (can differ from up segments)
+        let pcbs = self.select_best_pcbs(20);
+
+        // Group by originating core AS
+        let mut batches: HashMap<IsdAs, Vec<std::sync::Arc<super::path_db::PathSegment>>> =
+            HashMap::new();
+
+        for pcb in pcbs {
+            // Get originating core AS (first AS in PCB)
+            if let Some(origin_as) = pcb.src() {
+                // Terminate PCB as down segment
+                let segment = self.terminate_pcb(pcb, SegmentType::Down);
+
+                batches
+                    .entry(origin_as)
+                    .or_insert_with(Vec::new)
+                    .push(segment);
+            }
+        }
+
+        batches.into_iter().collect()
+    }
+
+    /// Register core segments (core AS only)
+    ///
+    /// §4.2: Core ASes transform selected PCBs into core segments and store
+    /// them locally. No need to send to other core ASes - each will receive
+    /// PCBs from all others during beaconing.
+    ///
+    /// Returns the registered segments for inspection/testing.
+    pub fn register_core_segments(
+        &mut self,
+    ) -> Vec<std::sync::Arc<super::path_db::PathSegment>> {
+        use super::path_db::SegmentType;
+
+        if !self.is_core {
+            return vec![]; // Only core ASes register core segments
+        }
+
+        // Select best PCBs toward each observed core AS
+        // More diversity for core (up to 50)
+        let pcbs = self.select_best_pcbs(50);
+
+        let mut segments = Vec::new();
+
+        for pcb in pcbs {
+            // Terminate PCB as core segment
+            let segment = self.terminate_pcb(pcb, SegmentType::Core);
+
+            // Store in local path database
+            self.path_db.add_segment(segment.clone());
+
+            segments.push(segment);
+        }
+
+        segments
+    }
+
+    /// Validate a down segment for registration
+    ///
+    /// §4.1.3: The first ISD-AS entry of the path segment SHOULD equal the core
+    /// ISD-AS where the segment is being registered. If not, MUST reject.
+    pub fn validate_down_segment(&self, segment: &super::path_db::PathSegment) -> bool {
+        // Get first AS entry from the PCB
+        let first_as = segment.pcb.src();
+
+        // Must equal our ISD-AS
+        first_as == Some(self.isd_as)
+    }
 }
 
 #[cfg(test)]
