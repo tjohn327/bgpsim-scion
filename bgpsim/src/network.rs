@@ -29,6 +29,7 @@ use crate::{
     },
     route_map::{RouteMap, RouteMapDirection},
     router::{Router, StaticRoute},
+    scion::{IsdAs, ScionControlService},
     types::{
         IntoIpv4Prefix, Ipv4Prefix, NetworkError, NetworkErrorOption, PhysicalNetwork, Prefix,
         PrefixSet, RouterId, SimplePrefix, ASN,
@@ -103,6 +104,12 @@ pub struct Network<
     pub(crate) stop_after: Option<usize>,
     pub(crate) queue: Q,
     pub(crate) skip_queue: bool,
+
+    // SCION integration
+    /// SCION control services (one per ISD-AS)
+    pub(crate) scion_services: BTreeMap<IsdAs, ScionControlService>,
+    /// Mapping from RouterId to ISD-AS (for SCION-enabled routers)
+    pub(crate) router_to_as: BTreeMap<RouterId, IsdAs>,
 }
 
 impl<P: Prefix, Q: Clone, Ospf: OspfImpl> Clone for Network<P, Q, Ospf> {
@@ -119,6 +126,8 @@ impl<P: Prefix, Q: Clone, Ospf: OspfImpl> Clone for Network<P, Q, Ospf> {
             stop_after: self.stop_after,
             queue: self.queue.clone(),
             skip_queue: self.skip_queue,
+            scion_services: self.scion_services.clone(),
+            router_to_as: self.router_to_as.clone(),
         }
     }
 }
@@ -141,6 +150,8 @@ impl<P: Prefix, Q, Ospf: OspfImpl> Network<P, Q, Ospf> {
             stop_after: Some(DEFAULT_STOP_AFTER),
             queue,
             skip_queue: false,
+            scion_services: BTreeMap::new(),
+            router_to_as: BTreeMap::new(),
         }
     }
 
@@ -466,6 +477,8 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
             stop_after: self.stop_after,
             queue,
             skip_queue: self.skip_queue,
+            scion_services: self.scion_services,
+            router_to_as: self.router_to_as,
         }
     }
 
@@ -525,6 +538,165 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         self.enqueue_events(events);
         self.refresh_bgp_sessions()?;
         self.do_queue_maybe_skip()?;
+
+        Ok(())
+    }
+
+    /// Enable SCION on a router by assigning it to a SCION AS.
+    ///
+    /// This creates a ScionControlService for the AS if it doesn't exist yet.
+    /// Multiple routers can belong to the same SCION AS.
+    ///
+    /// # Arguments
+    /// * `router` - Router to enable SCION on
+    /// * `isd_as` - ISD-AS identifier for this router
+    /// * `is_core` - Whether this AS is a core AS
+    ///
+    /// # Example
+    /// ```rust
+    /// # use bgpsim::prelude::*;
+    /// # use bgpsim::scion::{IsdAs, IsdNumber};
+    /// # fn main() -> Result<(), NetworkError> {
+    /// # let mut net: Network<SimplePrefix, _> = Network::default();
+    /// let r1 = net.add_router("r1", 65100);
+    /// let r2 = net.add_router("r2", 65100);
+    /// net.add_link(r1, r2)?;
+    ///
+    /// // Enable SCION on both routers in AS 1-100
+    /// let isd_as = IsdAs::new(1, 100);
+    /// net.enable_scion_router(r1, isd_as, true)?;
+    /// net.enable_scion_router(r2, isd_as, true)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn enable_scion_router(
+        &mut self,
+        router: RouterId,
+        isd_as: IsdAs,
+        is_core: bool,
+    ) -> Result<(), NetworkError> {
+        // Check that router exists
+        if !self.routers.contains_key(&router) {
+            return Err(NetworkError::DeviceNotFound(router));
+        }
+
+        // Create control service if it doesn't exist
+        self.scion_services
+            .entry(isd_as)
+            .or_insert_with(|| ScionControlService::new(isd_as, is_core));
+
+        // Map router to AS
+        self.router_to_as.insert(router, isd_as);
+
+        Ok(())
+    }
+
+    /// Add a SCION external link between two routers in different ASes.
+    ///
+    /// This requires:
+    /// - Both routers must be SCION-enabled (via `enable_scion_router`)
+    /// - Both routers must be in different ASes
+    /// - A physical link must exist between them (via `add_link`)
+    ///
+    /// # Arguments
+    /// * `router_a` - First router (will be marked as border router)
+    /// * `router_b` - Second router (will be marked as border router)
+    /// * `link_type` - Link type from router_a's perspective (Parent, Child, Core, Peer)
+    ///
+    /// # Example
+    /// ```rust
+    /// # use bgpsim::prelude::*;
+    /// # use bgpsim::scion::{IsdAs, IsdNumber, ScionLinkType};
+    /// # fn main() -> Result<(), NetworkError> {
+    /// # let mut net: Network<SimplePrefix, _> = Network::default();
+    /// let r1 = net.add_router("r1", 65100);
+    /// let r2 = net.add_router("r2", 65101);
+    /// net.add_link(r1, r2)?;
+    ///
+    /// // Enable SCION
+    /// net.enable_scion_router(r1, IsdAs::new(1, 100), true)?;
+    /// net.enable_scion_router(r2, IsdAs::new(1, 101), false)?;
+    ///
+    /// // Add SCION link (parent-child relationship)
+    /// net.add_scion_link(r1, r2, ScionLinkType::Child)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_scion_link(
+        &mut self,
+        router_a: RouterId,
+        router_b: RouterId,
+        link_type: crate::scion::ScionLinkType,
+    ) -> Result<(), NetworkError> {
+        use crate::scion::{InterfaceId, InterfaceInfo, ScionLinkType};
+
+        // Check that physical link exists
+        if !self.net.contains_edge(router_a, router_b) {
+            return Err(NetworkError::LinkNotFound(router_a, router_b));
+        }
+
+        // Check that both routers are SCION-enabled
+        let as_a = self
+            .router_to_as
+            .get(&router_a)
+            .ok_or(NetworkError::DeviceNotFound(router_a))?;
+        let as_b = self
+            .router_to_as
+            .get(&router_b)
+            .ok_or(NetworkError::DeviceNotFound(router_b))?;
+
+        // Check that routers are in different ASes
+        if as_a == as_b {
+            return Err(NetworkError::ScionError(format!(
+                "Cannot add SCION link between routers in the same AS ({:?})",
+                as_a
+            )));
+        }
+
+        // Get control services
+        let cs_a = self
+            .scion_services
+            .get_mut(as_a)
+            .ok_or(NetworkError::DeviceNotFound(router_a))?;
+
+        // Allocate interface IDs
+        let iface_a = cs_a.allocate_interface();
+
+        // Create interface info for AS A
+        let info_a = InterfaceInfo {
+            local_router: router_a,
+            remote_as: *as_b,
+            remote_interface: InterfaceId::ZERO, // Will be updated after allocating in AS B
+            link_type,
+        };
+
+        cs_a.add_interface(iface_a, info_a);
+
+        // Now handle AS B
+        let cs_b = self
+            .scion_services
+            .get_mut(as_b)
+            .ok_or(NetworkError::DeviceNotFound(router_b))?;
+
+        let iface_b = cs_b.allocate_interface();
+
+        // Determine reverse link type
+        let reverse_link_type = link_type.reverse();
+
+        let info_b = InterfaceInfo {
+            local_router: router_b,
+            remote_as: *as_a,
+            remote_interface: iface_a, // Points to the interface we just created
+            link_type: reverse_link_type,
+        };
+
+        cs_b.add_interface(iface_b, info_b);
+
+        // Update AS A's interface to point to AS B's interface
+        let cs_a = self.scion_services.get_mut(as_a).unwrap();
+        if let Some(info) = cs_a.interfaces.get_mut(&iface_a) {
+            info.remote_interface = iface_b;
+        }
 
         Ok(())
     }
@@ -1111,6 +1283,8 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
                 .collect(),
             stop_after: self.stop_after,
             skip_queue: self.skip_queue,
+            scion_services: self.scion_services,
+            router_to_as: self.router_to_as,
         })
     }
 }

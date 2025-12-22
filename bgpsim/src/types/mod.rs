@@ -291,6 +291,9 @@ pub enum NetworkError {
     /// Json error
     #[error("{0}")]
     JsonError(Box<serde_json::Error>),
+    /// SCION-specific errors
+    #[error("SCION error: {0}")]
+    ScionError(String),
 }
 
 impl From<serde_json::Error> for NetworkError {

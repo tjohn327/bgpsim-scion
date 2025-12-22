@@ -66,7 +66,7 @@ impl fmt::Display for IsdAs {
 ///
 /// Each AS-to-AS link is identified by a 16-bit interface ID local to the AS.
 /// Interface IDs are used in hop fields to specify ingress/egress interfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InterfaceId(pub u16);
 
 impl InterfaceId {
@@ -94,7 +94,7 @@ impl fmt::Display for InterfaceId {
 ///
 /// SCION distinguishes different link types that determine how PCBs are propagated
 /// and how path segments are constructed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ScionLinkType {
     /// Core-to-core link (between core ASes, possibly in different ISDs)
     Core,

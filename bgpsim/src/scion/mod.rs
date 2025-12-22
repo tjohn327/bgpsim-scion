@@ -21,6 +21,8 @@ pub mod beacon_store;
 pub mod path_db;
 /// SCION control plane events
 pub mod event;
+/// SCION control service (AS-level coordinator)
+pub mod control_service;
 
 // Re-export commonly used types
 pub use types::*;
@@ -28,3 +30,4 @@ pub use pcb::*;
 pub use beacon_store::*;
 pub use path_db::*;
 pub use event::*;
+pub use control_service::*;

@@ -1102,6 +1102,7 @@ impl<'n, P: Prefix, Q, Ospf: OspfImpl> NetworkFormatter<'n, P, Q, Ospf> for Netw
             NetworkError::InconsistentOspfState(k) => {
                 format!("OSPF state is inconsistent for key {}", k.fmt(net))
             }
+            NetworkError::ScionError(msg) => format!("SCION error: {msg}"),
         }
     }
 }
