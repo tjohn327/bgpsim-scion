@@ -628,7 +628,7 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         router_b: RouterId,
         link_type: crate::scion::ScionLinkType,
     ) -> Result<(), NetworkError> {
-        use crate::scion::{InterfaceId, InterfaceInfo, ScionLinkType};
+        use crate::scion::{InterfaceId, InterfaceInfo};
 
         // Check that physical link exists
         if !self.net.contains_edge(router_a, router_b) {
@@ -1198,6 +1198,82 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
     #[inline(always)]
     pub(crate) fn enqueue_events(&mut self, events: Vec<Event<P, Q::Priority>>) {
         self.queue.push_many(events, &self.routers, &self.net)
+    }
+
+    /// Handle a SCION event at the AS level
+    ///
+    /// SCION events operate on ASes, not individual routers. This method processes
+    /// SCION control plane events (beaconing, path registration, timeouts).
+    pub(crate) fn handle_scion_event<T: Default>(
+        &mut self,
+        event: Event<P, T>,
+    ) -> Result<crate::event::EventOutcome<P, T>, NetworkError> {
+        use crate::scion::ScionEvent;
+        use crate::types::StepUpdate;
+
+        match event {
+            Event::Scion { src: _, dst, e, .. } => {
+                // Get the destination AS's control service
+                let control_service = self
+                    .scion_services
+                    .get_mut(&dst)
+                    .ok_or_else(|| NetworkError::ScionError(format!(
+                        "SCION control service not found for AS {:?}",
+                        dst
+                    )))?;
+
+                // Process the SCION event based on type
+                match e {
+                    ScionEvent::BeaconBatch { pcbs, link_type: _ } => {
+                        // Store received PCBs in beacon store
+                        for pcb in pcbs {
+                            control_service.beacon_store.insert(pcb);
+                        }
+
+                        // TODO: In later phases, trigger PCB propagation based on link_type
+                        // For now, just accept and store
+
+                        Ok((StepUpdate::Unchanged, vec![]))
+                    }
+
+                    ScionEvent::SegmentRegistration { segments, segment_type: _ } => {
+                        // Store path segments in path database
+                        for segment in segments {
+                            control_service.path_db.add_segment(segment);
+                        }
+
+                        Ok((StepUpdate::Unchanged, vec![]))
+                    }
+
+                    ScionEvent::BeaconTimeout { interval_type: _ } => {
+                        // TODO: Implement periodic beaconing in later phases
+                        // This will:
+                        // 1. Select PCBs from beacon store
+                        // 2. Extend with own AS entry
+                        // 3. Propagate to appropriate neighbors
+                        // 4. Re-enqueue next timeout
+
+                        Ok((StepUpdate::Unchanged, vec![]))
+                    }
+
+                    ScionEvent::RegistrationTimeout => {
+                        // TODO: Implement segment registration in later phases
+                        // This will:
+                        // 1. Select segments for registration
+                        // 2. Send to path servers
+                        // 3. Re-enqueue next timeout
+
+                        Ok((StepUpdate::Unchanged, vec![]))
+                    }
+                }
+            }
+            _ => {
+                // Not a SCION event - shouldn't happen
+                Err(NetworkError::ScionError(
+                    "handle_scion_event called with non-SCION event".to_string()
+                ))
+            }
+        }
     }
 }
 

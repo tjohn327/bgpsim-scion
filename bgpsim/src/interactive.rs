@@ -194,12 +194,19 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> InteractiveNetwork<P, Q, Ospf>
         if let Some(event) = self.queue.pop() {
             // log the job
             log::trace!("{}", event.fmt(self));
+
             // execute the event
-            let (step_update, events) = self
-                .routers
-                .get_mut(&event.router())
-                .ok_or(NetworkError::DeviceNotFound(event.router()))?
-                .handle_event(event.clone())?;
+            let (step_update, events) = if event.is_scion_event() {
+                // SCION events are handled at AS level, not router level
+                self.handle_scion_event(event.clone())?
+            } else {
+                // BGP/OSPF events are handled at router level
+                self
+                    .routers
+                    .get_mut(&event.router())
+                    .ok_or(NetworkError::DeviceNotFound(event.router()))?
+                    .handle_event(event.clone())?
+            };
 
             self.enqueue_events(events);
 
