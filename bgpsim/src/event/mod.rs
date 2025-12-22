@@ -15,8 +15,6 @@
 
 //! Module for defining events
 
-use std::hash::Hash;
-
 use serde::{Deserialize, Serialize};
 
 mod queue;
@@ -29,11 +27,12 @@ pub use rand_queue::{GeoTimingModel, ModelParams, SimpleTimingModel};
 use crate::{
     bgp::BgpEvent,
     ospf::{local::OspfEvent, OspfArea},
+    scion::{event::ScionEvent, types::IsdAs},
     types::{IntoIpv4Prefix, Ipv4Prefix, Prefix, RouterId, StepUpdate},
 };
 
 /// Event to handle
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "P: Serialize, T: serde::Serialize",
     deserialize = "P: for<'a> serde::Deserialize<'a>, T: for<'a> serde::Deserialize<'a>"
@@ -65,6 +64,25 @@ pub enum Event<P: Prefix, T> {
         /// The specific OSPF event.
         e: OspfEvent,
     },
+    /// SCION Event from AS `src` to AS `dst` (AS-level, not router-level).
+    ///
+    /// SCION events operate at the AS level for scalability. Multiple routers
+    /// within an AS share a single ScionControlService that handles beaconing
+    /// and path segment registration.
+    ///
+    /// Note: Serialization is not supported for SCION events due to Arc-based data structures.
+    #[serde(skip)]
+    Scion {
+        /// The priority (time). Can be ignored when handling events, (unless you implement a custom
+        /// queue).
+        p: T,
+        /// The source ISD-AS
+        src: IsdAs,
+        /// The destination ISD-AS
+        dst: IsdAs,
+        /// The specific SCION event.
+        e: ScionEvent,
+    },
 }
 
 impl<P: Prefix, T> Event<P, T> {
@@ -84,6 +102,11 @@ impl<P: Prefix, T> Event<P, T> {
         }
     }
 
+    /// Create a new SCION event
+    pub fn scion(p: T, src: IsdAs, dst: IsdAs, e: ScionEvent) -> Self {
+        Self::Scion { p, src, dst, e }
+    }
+
     /// Returns the prefix for which this event talks about.
     pub fn prefix(&self) -> Option<P> {
         match self {
@@ -95,21 +118,21 @@ impl<P: Prefix, T> Event<P, T> {
                 e: BgpEvent::Withdraw(prefix),
                 ..
             } => Some(*prefix),
-            Event::Ospf { .. } => None,
+            Event::Ospf { .. } | Event::Scion { .. } => None,
         }
     }
 
     /// Get a reference to the priority of this event.
     pub fn priority(&self) -> &T {
         match self {
-            Event::Bgp { p, .. } | Event::Ospf { p, .. } => p,
+            Event::Bgp { p, .. } | Event::Ospf { p, .. } | Event::Scion { p, .. } => p,
         }
     }
 
     /// Get a reference to the priority of this event.
     pub fn priority_mut(&mut self) -> &mut T {
         match self {
-            Event::Bgp { p, .. } | Event::Ospf { p, .. } => p,
+            Event::Bgp { p, .. } | Event::Ospf { p, .. } | Event::Scion { p, .. } => p,
         }
     }
 
@@ -118,17 +141,42 @@ impl<P: Prefix, T> Event<P, T> {
         matches!(self, Event::Bgp { .. })
     }
 
-    /// Return the source of the event.
+    /// Returns true if the event is a scion message
+    pub fn is_scion_event(&self) -> bool {
+        matches!(self, Event::Scion { .. })
+    }
+
+    /// Return the source of the event (router ID for BGP/OSPF, None for SCION).
+    ///
+    /// For SCION events, use `scion_source()` to get the IsdAs.
     pub fn source(&self) -> RouterId {
         match self {
             Event::Bgp { src, .. } | Event::Ospf { src, .. } => *src,
+            Event::Scion { .. } => RouterId::from(0),  // SCION uses AS-level addressing
         }
     }
 
-    /// Return the router where the event is processed
+    /// Return the SCION source AS (None for BGP/OSPF events)
+    pub fn scion_source(&self) -> Option<IsdAs> {
+        match self {
+            Event::Scion { src, .. } => Some(*src),
+            _ => None,
+        }
+    }
+
+    /// Return the SCION destination AS (None for BGP/OSPF events)
+    pub fn scion_destination(&self) -> Option<IsdAs> {
+        match self {
+            Event::Scion { dst, .. } => Some(*dst),
+            _ => None,
+        }
+    }
+
+    /// Return the router where the event is processed (None for SCION events)
     pub fn router(&self) -> RouterId {
         match self {
             Event::Bgp { dst, .. } | Event::Ospf { dst, .. } => *dst,
+            Event::Scion { .. } => RouterId::from(0),  // SCION uses AS-level addressing
         }
     }
 }
@@ -156,6 +204,66 @@ impl<P: Prefix, T> IntoIpv4Prefix for Event<P, T> {
                 area,
                 e,
             },
+            Event::Scion { src, dst, e, .. } => Event::Scion {
+                p: (),
+                src,
+                dst,
+                e,
+            },
+        }
+    }
+}
+
+// Manual trait implementations for Event
+// Scion events use Arc, so we compare by pointer equality
+
+impl<P: Prefix, T: PartialEq> PartialEq for Event<P, T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Event::Bgp { p: p1, src: src1, dst: dst1, e: e1 },
+             Event::Bgp { p: p2, src: src2, dst: dst2, e: e2 }) => {
+                p1 == p2 && src1 == src2 && dst1 == dst2 && e1 == e2
+            }
+            (Event::Ospf { p: p1, src: src1, dst: dst1, area: area1, e: e1 },
+             Event::Ospf { p: p2, src: src2, dst: dst2, area: area2, e: e2 }) => {
+                p1 == p2 && src1 == src2 && dst1 == dst2 && area1 == area2 && e1 == e2
+            }
+            (Event::Scion { .. }, Event::Scion { .. }) => {
+                // SCION events with Arc are never equal (pointer comparison would be needed)
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<P: Prefix, T: Eq> Eq for Event<P, T> {}
+
+impl<P: Prefix, T: std::hash::Hash> std::hash::Hash for Event<P, T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Event::Bgp { p, src, dst, e } => {
+                0u8.hash(state);
+                p.hash(state);
+                src.hash(state);
+                dst.hash(state);
+                e.hash(state);
+            }
+            Event::Ospf { p, src, dst, area, e } => {
+                1u8.hash(state);
+                p.hash(state);
+                src.hash(state);
+                dst.hash(state);
+                area.hash(state);
+                e.hash(state);
+            }
+            Event::Scion { p, src, dst, .. } => {
+                // Hash only the metadata, not the Arc contents
+                2u8.hash(state);
+                p.hash(state);
+                src.hash(state);
+                dst.hash(state);
+            }
         }
     }
 }

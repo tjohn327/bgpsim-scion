@@ -92,7 +92,10 @@ pub struct SegmentInfo {
 }
 
 impl SegmentInfo {
-    /// Create new segment info with current timestamp and random ID
+    /// Create new segment info with current timestamp and derived ID
+    ///
+    /// For simulation purposes, segment_id is derived from the timestamp
+    /// rather than being cryptographically random.
     pub fn new() -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -101,7 +104,9 @@ impl SegmentInfo {
 
         Self {
             timestamp,
-            segment_id: rand::random::<u16>(),
+            // Use lower 16 bits of timestamp as segment ID
+            // (sufficient uniqueness for simulation)
+            segment_id: (timestamp & 0xFFFF) as u16,
         }
     }
 

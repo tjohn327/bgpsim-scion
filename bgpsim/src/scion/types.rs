@@ -1,13 +1,14 @@
 // Core SCION type definitions
 
 use crate::types::ASN;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// ISD (Isolation Domain) number
 ///
 /// ISDs group ASes for independent routing and trust management.
 /// ISD numbers are 16-bit identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IsdNumber(pub u16);
 
 impl IsdNumber {
@@ -32,7 +33,7 @@ impl fmt::Display for IsdNumber {
 ///
 /// In SCION, each AS is uniquely identified by the combination of its ISD number
 /// and AS number. This struct represents that combined identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IsdAs {
     /// ISD number
     pub isd: IsdNumber,

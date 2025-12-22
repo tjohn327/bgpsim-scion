@@ -199,6 +199,11 @@ impl<P: Prefix, Ospf: OspfProcess> Router<P, Ospf> {
             Event::Bgp { dst, .. } | Event::Ospf { dst, .. } => {
                 Err(DeviceError::WrongRouter(self.router_id, dst))
             }
+            Event::Scion { .. } => {
+                // SCION events are handled at the AS level by ScionControlService,
+                // not at the router level. This should not be called.
+                Ok((StepUpdate::Unchanged, vec![]))
+            }
         }
     }
 
