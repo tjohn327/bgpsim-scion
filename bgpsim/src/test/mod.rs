@@ -125,5 +125,6 @@ mod test_save_restore;
 #[cfg(feature = "rand")]
 mod test_serde;
 mod test_scion_phase2;
+mod test_scion_phase3;
 #[cfg(feature = "topology_zoo")]
 mod test_topology_zoo;

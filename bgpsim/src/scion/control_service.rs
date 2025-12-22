@@ -167,6 +167,403 @@ impl ScionControlService {
     pub fn get_interface(&self, iface_id: InterfaceId) -> Option<&InterfaceInfo> {
         self.interfaces.get(&iface_id)
     }
+
+    // ===== PCB Validation Methods (§2.3.1) =====
+
+    /// Validate an incoming PCB
+    ///
+    /// Performs all required validation checks from §2.3.1:
+    /// - Loop detection
+    /// - Incoming interface validation
+    /// - Link type validation
+    /// - Continuity check
+    pub fn validate_pcb(
+        &self,
+        pcb: &super::pcb::Pcb,
+        link_type: ScionLinkType,
+        receiving_iface: Option<InterfaceId>,
+    ) -> bool {
+        // Basic check: PCB must not be empty
+        if pcb.is_empty() {
+            return false;
+        }
+
+        // Loop detection (§2.3.1)
+        if self.has_loop(pcb) {
+            return false;
+        }
+
+        // Link type validation (§2.3.1)
+        if !self.validate_link_type(link_type) {
+            return false;
+        }
+
+        // Incoming interface validation (§2.3.1)
+        if let Some(iface_id) = receiving_iface {
+            if !self.validate_incoming_interface(pcb, iface_id) {
+                return false;
+            }
+        }
+
+        // Continuity check (§2.3.1)
+        if !self.validate_continuity(pcb) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Check if this AS already appears in the PCB (loop detection)
+    ///
+    /// §2.3.1: Core ASes MUST check for duplicate hop entries.
+    /// PCBs with loops MUST be discarded.
+    fn has_loop(&self, pcb: &super::pcb::Pcb) -> bool {
+        pcb.contains(self.isd_as)
+    }
+
+    /// Validate that the last AS entry in PCB matches the neighbor on the receiving interface
+    ///
+    /// §2.3.1: The last ISD-AS entry in the received PCB MUST match the ISD-AS
+    /// neighbor of the interface where the PCB was received.
+    fn validate_incoming_interface(
+        &self,
+        pcb: &super::pcb::Pcb,
+        receiving_iface: InterfaceId,
+    ) -> bool {
+        // Get last AS entry
+        let last_entry = match pcb.as_entries.last() {
+            Some(entry) => entry,
+            None => return false,
+        };
+
+        // Get interface info
+        let iface_info = match self.interfaces.get(&receiving_iface) {
+            Some(info) => info,
+            None => return false,
+        };
+
+        // Last AS entry must match neighbor on this interface
+        last_entry.isd_as == iface_info.remote_as
+    }
+
+    /// Validate link type is appropriate for beaconing mode
+    ///
+    /// §2.3.1: The corresponding link MUST be core or parent (not peering).
+    fn validate_link_type(&self, link_type: ScionLinkType) -> bool {
+        match link_type {
+            // Core beaconing: accept from Core links
+            ScionLinkType::Core if self.is_core => true,
+
+            // Intra-ISD beaconing: accept from Parent links
+            ScionLinkType::Parent if !self.is_core => true,
+
+            // Core AS can also receive intra-ISD from children (origination case)
+            ScionLinkType::Child if self.is_core => true,
+
+            // Never accept from Peer links
+            ScionLinkType::Peer => false,
+
+            // All other combinations invalid
+            _ => false,
+        }
+    }
+
+    /// Verify continuity: each AS entry's next_isd_as equals next entry's isd_as
+    ///
+    /// §2.3.1: When a PCB contains two or more AS entries, the receiver MUST check
+    /// that every AS entry (except the last) has an ISD-AS that equals the ISD-AS
+    /// of the next entry.
+    fn validate_continuity(&self, pcb: &super::pcb::Pcb) -> bool {
+        let entries = &pcb.as_entries;
+
+        if entries.len() < 2 {
+            return true; // Single entry or empty PCB (handled elsewhere)
+        }
+
+        for i in 0..entries.len() - 1 {
+            if let Some(next_as) = entries[i].next_isd_as {
+                if next_as != entries[i + 1].isd_as {
+                    return false; // Continuity violation
+                }
+            } else {
+                // Entry has no next_isd_as but is not the last entry
+                return false;
+            }
+        }
+
+        true
+    }
+
+    // ===== PCB Selection Methods (§2.3.3) =====
+
+    /// Select best N PCBs by shortest AS path length
+    ///
+    /// §2.3.3: AS path length is the primary selection criterion.
+    /// This method selects the N shortest PCBs from the beacon store.
+    ///
+    /// # Arguments
+    /// * `limit` - Maximum number of PCBs to select (≤50 for intra-ISD, ≤5 for core)
+    pub fn select_best_pcbs(&self, limit: usize) -> Vec<std::sync::Arc<super::pcb::Pcb>> {
+        use std::cmp::Ordering;
+
+        let mut pcbs: Vec<_> = self.beacon_store.get_all().collect();
+
+        // Sort by AS path length (shorter is better)
+        pcbs.sort_by(|a, b| {
+            match a.len().cmp(&b.len()) {
+                Ordering::Equal => {
+                    // Tie-break by segment_id for determinism
+                    a.segment_info.segment_id.cmp(&b.segment_info.segment_id)
+                }
+                other => other,
+            }
+        });
+
+        // Take top N
+        pcbs.into_iter().take(limit).collect()
+    }
+
+    /// Select best N PCBs for a specific neighbor (core beaconing)
+    ///
+    /// §3.4.2: For core beaconing, select ≤5 PCBs per immediate neighbor core AS.
+    /// This method filters out PCBs that already contain the neighbor (loop prevention)
+    /// and selects the shortest remaining paths.
+    ///
+    /// # Arguments
+    /// * `neighbor_as` - The neighbor AS we're propagating to
+    /// * `limit` - Maximum number of PCBs to select (typically 5 for core)
+    pub fn select_best_pcbs_for_neighbor(
+        &self,
+        neighbor_as: IsdAs,
+        limit: usize,
+    ) -> Vec<std::sync::Arc<super::pcb::Pcb>> {
+        use std::cmp::Ordering;
+
+        // Filter out PCBs that already contain the neighbor (loop prevention)
+        let mut pcbs: Vec<_> = self
+            .beacon_store
+            .get_all()
+            .filter(|pcb| !pcb.contains(neighbor_as))
+            .collect();
+
+        // Sort by AS path length
+        pcbs.sort_by(|a, b| {
+            match a.len().cmp(&b.len()) {
+                Ordering::Equal => {
+                    a.segment_info.segment_id.cmp(&b.segment_info.segment_id)
+                }
+                other => other,
+            }
+        });
+
+        // Take top N
+        pcbs.into_iter().take(limit).collect()
+    }
+
+    // ===== PCB Extension and Origination Methods (§2.3.5) =====
+
+    /// Determine the ingress interface for a received PCB
+    ///
+    /// This finds which interface the PCB came from by matching the last AS entry's
+    /// egress interface with our interface that connects to that AS.
+    fn get_ingress_interface(&self, pcb: &super::pcb::Pcb) -> Option<InterfaceId> {
+        // Get the last AS entry
+        let last_entry = pcb.as_entries.last()?;
+
+        // Get the egress interface from the last hop
+        let remote_egress = last_entry.hop_entry.egress?;
+
+        // Find our interface that connects to the last AS
+        for (iface_id, iface_info) in &self.interfaces {
+            if iface_info.remote_as == last_entry.isd_as
+                && iface_info.remote_interface == remote_egress
+            {
+                return Some(*iface_id);
+            }
+        }
+
+        None
+    }
+
+    /// Extend PCB for intra-ISD propagation to child AS
+    ///
+    /// §2.3.5.1: For intra-ISD beaconing, MUST add a new AS entry including:
+    /// - Hop Entry with ingress/egress interface IDs
+    /// - Any Peer Entry information (currently not implemented)
+    ///
+    /// # Arguments
+    /// * `pcb` - The PCB to extend (Arc for efficiency)
+    /// * `egress_iface` - Our egress interface to the child AS
+    /// * `next_as` - The child AS we're propagating to
+    pub fn extend_pcb_intra_isd(
+        &self,
+        pcb: std::sync::Arc<super::pcb::Pcb>,
+        egress_iface: InterfaceId,
+        next_as: IsdAs,
+    ) -> std::sync::Arc<super::pcb::Pcb> {
+        use super::pcb::{AsEntry, HopEntry};
+
+        let mut new_pcb = (*pcb).clone();
+
+        // Determine ingress interface (where we received this PCB)
+        let ingress_iface = self
+            .get_ingress_interface(&pcb)
+            .unwrap_or(InterfaceId::ZERO); // ZERO if we originated it
+
+        // Create hop entry with ingress/egress
+        let hop_entry = HopEntry::new(ingress_iface, Some(egress_iface));
+
+        // Create AS entry
+        let as_entry = AsEntry::new(self.isd_as, Some(next_as), hop_entry);
+
+        // Note: Peer entries could be added here in the future
+        // for peer in self.get_configured_peers() {
+        //     as_entry.add_peer_entry(peer);
+        // }
+
+        new_pcb.extend(as_entry);
+        std::sync::Arc::new(new_pcb)
+    }
+
+    /// Extend PCB for core propagation to neighboring core AS
+    ///
+    /// §2.3.5.2: For core beaconing, MUST add a new AS entry which MUST include:
+    /// - The egress interface to the neighboring core AS in the Hop Field
+    /// - The ISD-AS number of the neighboring core AS
+    ///
+    /// # Arguments
+    /// * `pcb` - The PCB to extend (Arc for efficiency)
+    /// * `egress_iface` - Our egress interface to the core neighbor
+    /// * `next_as` - The neighboring core AS
+    pub fn extend_pcb_core(
+        &self,
+        pcb: std::sync::Arc<super::pcb::Pcb>,
+        egress_iface: InterfaceId,
+        next_as: IsdAs,
+    ) -> std::sync::Arc<super::pcb::Pcb> {
+        use super::pcb::{AsEntry, HopEntry};
+
+        let mut new_pcb = (*pcb).clone();
+
+        // Determine ingress interface
+        let ingress_iface = self
+            .get_ingress_interface(&pcb)
+            .unwrap_or(InterfaceId::ZERO);
+
+        // Create hop entry
+        let hop_entry = HopEntry::new(ingress_iface, Some(egress_iface));
+
+        // Create AS entry with neighbor core AS
+        let as_entry = AsEntry::new(self.isd_as, Some(next_as), hop_entry);
+
+        new_pcb.extend(as_entry);
+        std::sync::Arc::new(new_pcb)
+    }
+
+    /// Create initial PCB originating from this core AS
+    ///
+    /// Core ASes create initial PCBs for both intra-ISD and core beaconing.
+    /// The originating AS has ingress = InterfaceId::ZERO to indicate it's the source.
+    ///
+    /// # Arguments
+    /// * `egress_iface` - Our egress interface to the neighbor
+    /// * `next_as` - The neighboring AS (child for intra-ISD, core for core beaconing)
+    pub fn originate_pcb(
+        &self,
+        egress_iface: InterfaceId,
+        next_as: IsdAs,
+    ) -> std::sync::Arc<super::pcb::Pcb> {
+        use super::pcb::{AsEntry, HopEntry, Pcb};
+
+        // Create empty PCB
+        let mut pcb = Pcb::new(self.isd_as);
+
+        // Create initial AS entry (ingress = 0 for originator)
+        let hop_entry = HopEntry::new(
+            InterfaceId::ZERO, // No ingress (we're the origin)
+            Some(egress_iface),
+        );
+
+        let as_entry = AsEntry::new(self.isd_as, Some(next_as), hop_entry);
+
+        pcb.extend(as_entry);
+        std::sync::Arc::new(pcb)
+    }
+
+    // ===== PCB Propagation Methods =====
+
+    /// Propagate intra-ISD PCBs to children
+    ///
+    /// This method handles both PCB origination (for core ASes) and forwarding (for non-core ASes).
+    /// Creates a vector of (remote_as, Vec<Arc<Pcb>>) tuples representing BeaconBatch events.
+    ///
+    /// §3.4.1: Propagate ≤50 PCBs per child link (typical: ~20)
+    pub fn propagate_intra_isd_pcbs(
+        &mut self,
+    ) -> Vec<(IsdAs, Vec<std::sync::Arc<super::pcb::Pcb>>)> {
+        let mut batches = Vec::new();
+
+        // For each child interface
+        for (iface_id, iface_info) in &self.interfaces {
+            if iface_info.link_type != ScionLinkType::Child {
+                continue;
+            }
+
+            let pcbs = if self.is_core {
+                // Core AS: originate one PCB per child interface
+                vec![self.originate_pcb(*iface_id, iface_info.remote_as)]
+            } else {
+                // Non-core AS: select and extend received PCBs
+                let selected = self.select_best_pcbs(50); // ≤50 per child (§3.4.1)
+
+                selected
+                    .into_iter()
+                    .map(|pcb| self.extend_pcb_intra_isd(pcb, *iface_id, iface_info.remote_as))
+                    .collect()
+            };
+
+            if !pcbs.is_empty() {
+                batches.push((iface_info.remote_as, pcbs));
+            }
+        }
+
+        batches
+    }
+
+    /// Propagate core PCBs to neighboring core ASes
+    ///
+    /// §3.4.2: Propagate ≤5 PCBs per immediate neighbor core AS
+    pub fn propagate_core_pcbs(&mut self) -> Vec<(IsdAs, Vec<std::sync::Arc<super::pcb::Pcb>>)> {
+        let mut batches = Vec::new();
+
+        // For each core interface
+        for (iface_id, iface_info) in &self.interfaces {
+            if iface_info.link_type != ScionLinkType::Core {
+                continue;
+            }
+
+            // If beacon store is empty, originate PCBs
+            let pcbs = if self.beacon_store.get_all().count() == 0 {
+                // Originate one PCB for this neighbor
+                vec![self.originate_pcb(*iface_id, iface_info.remote_as)]
+            } else {
+                // Select best PCBs for this neighbor (≤5 per neighbor, §3.4.2)
+                let selected = self.select_best_pcbs_for_neighbor(iface_info.remote_as, 5);
+
+                // Extend each PCB
+                selected
+                    .into_iter()
+                    .map(|pcb| self.extend_pcb_core(pcb, *iface_id, iface_info.remote_as))
+                    .collect()
+            };
+
+            if !pcbs.is_empty() {
+                batches.push((iface_info.remote_as, pcbs));
+            }
+        }
+
+        batches
+    }
 }
 
 #[cfg(test)]

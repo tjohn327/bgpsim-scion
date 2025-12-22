@@ -86,35 +86,44 @@ fn test_add_scion_link() {
 fn test_handle_beacon_batch_event() {
     let mut net: Network<SimplePrefix, _> = Network::default();
 
-    // Setup network
+    // Setup two core ASes
     let r1 = net.add_router("r1", 65100);
-    let isd_as = IsdAs::new(1, 100);
-    net.enable_scion_router(r1, isd_as, true).unwrap();
+    let r2 = net.add_router("r2", 65101);
+    net.add_link(r1, r2).unwrap();
 
-    // Create a PCB
-    let mut pcb = Pcb::new(isd_as);
+    let as1 = IsdAs::new(1, 100);
+    let as2 = IsdAs::new(1, 101);
+
+    net.enable_scion_router(r1, as1, true).unwrap(); // Core AS
+    net.enable_scion_router(r2, as2, true).unwrap(); // Core AS
+
+    // Add SCION link
+    net.add_scion_link(r1, r2, ScionLinkType::Core).unwrap();
+
+    // Create a PCB from AS1 (not containing AS2)
+    let mut pcb = Pcb::new(as1);
     let entry = AsEntry::new(
-        isd_as,
-        None,
-        HopEntry::new(InterfaceId::ZERO, None),
+        as1,
+        Some(as2), // Next AS is AS2
+        HopEntry::new(InterfaceId::ZERO, Some(InterfaceId::new(1))),
     );
     pcb.extend(entry);
     let pcb = Arc::new(pcb);
 
-    // Create BeaconBatch event
+    // Create BeaconBatch event (AS1 sending to AS2)
     let event = ScionEvent::BeaconBatch {
         pcbs: vec![pcb.clone()],
         link_type: ScionLinkType::Core,
     };
 
-    let scion_event = Event::scion((), isd_as, isd_as, event);
+    let scion_event = Event::scion((), as1, as2, event);
 
     // Process event
     let result = net.handle_scion_event(scion_event);
     assert!(result.is_ok());
 
-    // Verify PCB was stored
-    let cs = &net.scion_services[&isd_as];
+    // Verify PCB was stored in AS2
+    let cs = &net.scion_services[&as2];
     let stored_pcbs: Vec<_> = cs.beacon_store.get_all().collect();
     assert_eq!(stored_pcbs.len(), 1);
 

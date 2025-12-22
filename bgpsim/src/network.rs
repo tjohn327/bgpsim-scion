@@ -1224,14 +1224,18 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
                 // Process the SCION event based on type
                 match e {
-                    ScionEvent::BeaconBatch { pcbs, link_type: _ } => {
-                        // Store received PCBs in beacon store
+                    ScionEvent::BeaconBatch { pcbs, link_type } => {
+                        // Validate and store received PCBs
+                        // §2.3.1: PCBs must pass validation before storage
                         for pcb in pcbs {
-                            control_service.beacon_store.insert(pcb);
+                            // Validate PCB (loop, interface, link type, continuity)
+                            // Note: receiving_iface is None here because event doesn't specify it
+                            // In a real system, this would be included in the event
+                            if control_service.validate_pcb(&pcb, link_type, None) {
+                                control_service.beacon_store.insert(pcb);
+                            }
+                            // Invalid PCBs are silently dropped
                         }
-
-                        // TODO: In later phases, trigger PCB propagation based on link_type
-                        // For now, just accept and store
 
                         Ok((StepUpdate::Unchanged, vec![]))
                     }
@@ -1245,19 +1249,61 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
                         Ok((StepUpdate::Unchanged, vec![]))
                     }
 
-                    ScionEvent::BeaconTimeout { interval_type: _ } => {
-                        // TODO: Implement periodic beaconing in later phases
-                        // This will:
-                        // 1. Select PCBs from beacon store
-                        // 2. Extend with own AS entry
-                        // 3. Propagate to appropriate neighbors
-                        // 4. Re-enqueue next timeout
+                    ScionEvent::BeaconTimeout { interval_type } => {
+                        use crate::scion::{BeaconIntervalType, ScionLinkType};
 
-                        Ok((StepUpdate::Unchanged, vec![]))
+                        // Trigger PCB propagation
+                        let mut new_events = Vec::new();
+
+                        match interval_type {
+                            BeaconIntervalType::IntraIsd => {
+                                // Propagate intra-ISD PCBs to children
+                                let batches = control_service.propagate_intra_isd_pcbs();
+
+                                // Create BeaconBatch events
+                                for (remote_as, pcbs) in batches {
+                                    new_events.push(Event::scion(
+                                        T::default(),
+                                        dst, // Source is this AS
+                                        remote_as, // Destination is child AS
+                                        ScionEvent::BeaconBatch {
+                                            pcbs,
+                                            link_type: ScionLinkType::Parent, // Sent over Parent link
+                                        },
+                                    ));
+                                }
+
+                                // TODO: Schedule next timeout (Phase 4)
+                            }
+
+                            BeaconIntervalType::Core => {
+                                // Propagate core PCBs to neighboring core ASes
+                                if control_service.is_core {
+                                    let batches = control_service.propagate_core_pcbs();
+
+                                    // Create BeaconBatch events
+                                    for (remote_as, pcbs) in batches {
+                                        new_events.push(Event::scion(
+                                            T::default(),
+                                            dst, // Source is this core AS
+                                            remote_as, // Destination is neighbor core AS
+                                            ScionEvent::BeaconBatch {
+                                                pcbs,
+                                                link_type: ScionLinkType::Core,
+                                            },
+                                        ));
+                                    }
+                                }
+
+                                // TODO: Schedule next timeout (Phase 4)
+                            }
+                        }
+
+                        Ok((StepUpdate::Unchanged, new_events))
                     }
 
                     ScionEvent::RegistrationTimeout => {
-                        // TODO: Implement segment registration in later phases
+                        // TODO: Implement segment registration in Phase 4
                         // This will:
                         // 1. Select segments for registration
                         // 2. Send to path servers
