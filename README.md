@@ -61,12 +61,12 @@ fn main() -> Result<(), NetworkError> {
 
     let prefix = Prefix::from(0);
 
-    let e0 = t.add_external_router("E0", 1);
-    let b0 = t.add_router("B0");
-    let r0 = t.add_router("R0");
-    let r1 = t.add_router("R1");
-    let b1 = t.add_router("B1");
-    let e1 = t.add_external_router("E1", 2);
+    let e0 = t.add_router("E0", 1);
+    let b0 = t.add_router("B0", 65500);
+    let r0 = t.add_router("R0", 65500);
+    let r1 = t.add_router("R1", 65500);
+    let b1 = t.add_router("B1", 65500);
+    let e1 = t.add_router("E1", 2);
 
     t.add_link(e0, b0);
     t.add_link(b0, r0);
@@ -80,15 +80,15 @@ fn main() -> Result<(), NetworkError> {
     t.set_link_weight(r1, r0, 1.0)?;
     t.set_link_weight(r1, b1, 1.0)?;
     t.set_link_weight(b1, r1, 1.0)?;
-    t.set_bgp_session(e0, b0, Some(BgpSessionType::EBgp))?;
-    t.set_bgp_session(r0, b0, Some(BgpSessionType::IBgpClient))?;
-    t.set_bgp_session(r0, r1, Some(BgpSessionType::IBgpPeer))?;
-    t.set_bgp_session(r1, b1, Some(BgpSessionType::IBgpClient))?;
-    t.set_bgp_session(e1, b1, Some(BgpSessionType::EBgp))?;
+    t.set_bgp_session(e0, b0, Some(false))?;
+    t.set_bgp_session(r0, b0, Some(true))?;
+    t.set_bgp_session(r0, r1, Some(false))?;
+    t.set_bgp_session(r1, b1, Some(true))?;
+    t.set_bgp_session(e1, b1, Some(false))?;
 
     // advertise the same prefix on both routers
-    t.advertise_external_route(e0, prefix, &[1, 2, 3], None, None)?;
-    t.advertise_external_route(e1, prefix, &[2, 3], None, None)?;
+    t.advertise_route(e0, prefix, &[1, 2, 3], None, None)?;
+    t.advertise_route(e1, prefix, &[2, 3], None, None)?;
 
     // get the forwarding state
     let mut fw_state = t.get_forwarding_state();
@@ -111,21 +111,22 @@ fn main() -> Result<(), NetworkError> {
     let (t, (e0, b0, r0, r1, b1, e1)) = net! {
         Prefix = Ipv4Prefix;
         Ospf = GlobalOspf;
+        default_asn = 10;
         links = {
             b0 -> r0: 1;
             b1 -> r1: 1;
             r0 -> r1: 1;
         };
         sessions = {
-            e0!(1) -> b0;
-            e1!(2) -> b1;
+            e0(20) -> b0;
+            e1(21) -> b1;
             r0 -> r1;
             r0 -> b0: client;
             r1 -> b1: client;
         };
         routes = {
-            e0 -> "100.0.0.0/8" as {path: [1, 2, 3]};
-            e1 -> "100.0.0.0/8" as {path: [2, 3]};
+            e0 -> "100.0.0.0/8" as {path: [200, 100]};
+            e1 -> "100.0.0.0/8" as {path: [200]};
         };
         return (e0, b0, r0, r1, b1, e1)
     };
@@ -143,12 +144,12 @@ fn main() -> Result<(), NetworkError> {
 }
 ```
 
-This library contains networks from [TopologyZoo](http://www.topology-zoo.org) and convenient builder functions to quickly generate random configurations.
-Notice, that this requires the features `topology_zoo` and `rand`.
+This library contains networks from [TopologyZoo](http://www.topology-zoo.org).
+Notice, that this requires the `topology_zoo` feature.
 
 ```rust
 use bgpsim::prelude::*;
-use bgpsim::builder::*;
+use bgpsim::topology_zoo::TopologyZoo;
 
 type Prefix = SimplePrefix;           // Use non-overlapping prefixes.
 type Queue = BasicEventQueue<Prefix>; // Use a basic FIFO event queue
@@ -157,20 +158,13 @@ type Net = Network<Prefix, Queue, Ospf>;
 
 fn main() -> Result<(), NetworkError> {
 
-    // create the Abilene network
-    let mut net: Net = TopologyZoo::Abilene.build(Queue::new());
-    // Create 5 random external routers
-    net.build_external_routers(extend_to_k_external_routers, 5)?;
-    // Assign random link weights between 10 and 100.
-    net.build_link_weights(random_link_weight, (10.0, 100.0))?;
-    // Generate an iBGP full-mesh topology.
-    net.build_ibgp_full_mesh()?;
-    // Generate all eBGP sessions
-    net.build_ebgp_sessions()?;
-    // Generate route-maps to implement Gao-Rexford routing policies, with probability 20% that
-    // an external network will be treated as a customer, 30% that it will be treated as peer,
-    // and 50% that it will be a provider.
-    let _peer_types = net.build_gao_rexford_policies(GaoRexfordPeerType::random, (0.2, 0.3))?;
+    // create the Abilene network from TopologyZoo
+    // Abilene has only internal routers, so external ASNs don't matter
+    let net: Net = TopologyZoo::Abilene.build(Queue::new(), 65500, 1);
+
+    println!("TopologyZoo Abilene network created successfully!");
+    println!("Network has {} routers", net.routers().count());
+    println!("Network has {} links", net.get_topology().edge_count());
 
     Ok(())
 }
