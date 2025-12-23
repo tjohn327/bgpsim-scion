@@ -10,7 +10,7 @@
 
 use super::pcb::Pcb;
 use super::types::IsdAs;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 /// Configuration for beacon store limits
@@ -44,7 +44,8 @@ impl Default for BeaconStoreConfig {
 #[derive(Debug, Clone)]
 pub struct BeaconStore {
     // Primary storage: (source, segment_id) -> PCB
-    beacons: HashMap<(IsdAs, u16), Arc<Pcb>>,
+    // Use BTreeMap for deterministic iteration order
+    beacons: BTreeMap<(IsdAs, u16), Arc<Pcb>>,
 
     // Index by path length for fast selection
     by_length: BTreeMap<usize, Vec<(IsdAs, u16)>>,
@@ -69,7 +70,7 @@ impl BeaconStore {
     /// Create a beacon store with custom configuration
     pub fn with_config(config: BeaconStoreConfig) -> Self {
         Self {
-            beacons: HashMap::new(),
+            beacons: BTreeMap::new(),
             by_length: BTreeMap::new(),
             by_source: BTreeMap::new(),
             config,
