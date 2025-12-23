@@ -72,6 +72,13 @@ struct Topology {
     core_ases: Vec<IsdAs>,
 }
 
+/// SCION link info for deferred creation
+struct ScionLinkInfo {
+    r1: RouterId,
+    r2: RouterId,
+    link_type: ScionLinkType,
+}
+
 /// Build the complete SCION topology
 fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>) -> Topology {
     // Define AS identifiers
@@ -95,6 +102,9 @@ fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>
 
     // Store router IDs for each AS
     let mut as_routers: HashMap<IsdAs, Vec<RouterId>> = HashMap::new();
+    // Collect all links for bulk creation
+    let mut all_links: Vec<(RouterId, RouterId)> = Vec::new();
+    let mut scion_links: Vec<ScionLinkInfo> = Vec::new();
 
     // Create core ASes (4 border routers each)
     for &core_as in &[
@@ -105,13 +115,15 @@ fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>
         isd3_core1,
         isd3_core2,
     ] {
-        let routers = create_as(net, core_as, 4, true);
+        let (routers, internal_links) = create_as(net, core_as, 4, true);
+        all_links.extend(internal_links);
         as_routers.insert(core_as, routers);
     }
 
     // Create intermediate ASes (2 border routers each)
     for &intermediate_as in &[isd1_intermediate, isd2_intermediate, isd3_intermediate] {
-        let routers = create_as(net, intermediate_as, 2, false);
+        let (routers, internal_links) = create_as(net, intermediate_as, 2, false);
+        all_links.extend(internal_links);
         as_routers.insert(intermediate_as, routers);
     }
 
@@ -124,55 +136,64 @@ fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>
         isd3_leaf1,
         isd3_leaf2,
     ] {
-        let routers = create_as(net, leaf_as, 1, false);
+        let (routers, internal_links) = create_as(net, leaf_as, 1, false);
+        all_links.extend(internal_links);
         as_routers.insert(leaf_as, routers);
     }
 
-    // Add inter-AS links
+    // Collect inter-AS links (don't add yet)
 
     // ISD 1 internal links
-    add_core_link(net, &as_routers, isd1_core1, isd1_core2, 0, 1);
+    collect_core_link(&as_routers, isd1_core1, isd1_core2, 0, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd1_core1, isd1_intermediate, 2, 0);
-    add_child_link(net, &as_routers, isd1_core2, isd1_intermediate, 2, 1);
+    collect_child_link(&as_routers, isd1_core1, isd1_intermediate, 2, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd1_core2, isd1_intermediate, 2, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd1_intermediate, isd1_leaf1, 0, 0);
-    add_child_link(net, &as_routers, isd1_intermediate, isd1_leaf2, 1, 0);
+    collect_child_link(&as_routers, isd1_intermediate, isd1_leaf1, 0, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd1_intermediate, isd1_leaf2, 1, 0, &mut all_links, &mut scion_links);
 
     // ISD 2 internal links
-    add_core_link(net, &as_routers, isd2_core1, isd2_core2, 0, 1);
+    collect_core_link(&as_routers, isd2_core1, isd2_core2, 0, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd2_core1, isd2_intermediate, 2, 0);
-    add_child_link(net, &as_routers, isd2_core2, isd2_intermediate, 2, 1);
+    collect_child_link(&as_routers, isd2_core1, isd2_intermediate, 2, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd2_core2, isd2_intermediate, 2, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd2_intermediate, isd2_leaf1, 0, 0);
-    add_child_link(net, &as_routers, isd2_intermediate, isd2_leaf2, 1, 0);
+    collect_child_link(&as_routers, isd2_intermediate, isd2_leaf1, 0, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd2_intermediate, isd2_leaf2, 1, 0, &mut all_links, &mut scion_links);
 
     // ISD 3 internal links
-    add_core_link(net, &as_routers, isd3_core1, isd3_core2, 0, 1);
+    collect_core_link(&as_routers, isd3_core1, isd3_core2, 0, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd3_core1, isd3_intermediate, 2, 0);
-    add_child_link(net, &as_routers, isd3_core2, isd3_intermediate, 2, 1);
+    collect_child_link(&as_routers, isd3_core1, isd3_intermediate, 2, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd3_core2, isd3_intermediate, 2, 1, &mut all_links, &mut scion_links);
 
-    add_child_link(net, &as_routers, isd3_intermediate, isd3_leaf1, 0, 0);
-    add_child_link(net, &as_routers, isd3_intermediate, isd3_leaf2, 1, 0);
+    collect_child_link(&as_routers, isd3_intermediate, isd3_leaf1, 0, 0, &mut all_links, &mut scion_links);
+    collect_child_link(&as_routers, isd3_intermediate, isd3_leaf2, 1, 0, &mut all_links, &mut scion_links);
 
     // Inter-ISD core links (forming a mesh between cores)
     // ISD 1 <-> ISD 2
-    add_core_link(net, &as_routers, isd1_core1, isd2_core1, 1, 1);
-    add_core_link(net, &as_routers, isd1_core2, isd2_core2, 1, 1);
+    collect_core_link(&as_routers, isd1_core1, isd2_core1, 1, 1, &mut all_links, &mut scion_links);
+    collect_core_link(&as_routers, isd1_core2, isd2_core2, 1, 1, &mut all_links, &mut scion_links);
 
     // ISD 2 <-> ISD 3
-    add_core_link(net, &as_routers, isd2_core1, isd3_core1, 2, 2);
-    add_core_link(net, &as_routers, isd2_core2, isd3_core2, 2, 2);
+    collect_core_link(&as_routers, isd2_core1, isd3_core1, 2, 2, &mut all_links, &mut scion_links);
+    collect_core_link(&as_routers, isd2_core2, isd3_core2, 2, 2, &mut all_links, &mut scion_links);
 
     // ISD 3 <-> ISD 1
-    add_core_link(net, &as_routers, isd3_core1, isd1_core1, 1, 3);
-    add_core_link(net, &as_routers, isd3_core2, isd1_core2, 1, 3);
+    collect_core_link(&as_routers, isd3_core1, isd1_core1, 1, 3, &mut all_links, &mut scion_links);
+    collect_core_link(&as_routers, isd3_core2, isd1_core2, 1, 3, &mut all_links, &mut scion_links);
 
     // Peering links between intermediate ASes
-    add_peer_link(net, &as_routers, isd1_intermediate, isd2_intermediate, 0, 0);
-    add_peer_link(net, &as_routers, isd2_intermediate, isd3_intermediate, 1, 1);
+    collect_peer_link(&as_routers, isd1_intermediate, isd2_intermediate, 0, 0, &mut all_links, &mut scion_links);
+    collect_peer_link(&as_routers, isd2_intermediate, isd3_intermediate, 1, 1, &mut all_links, &mut scion_links);
+
+    // Add ALL links in one bulk operation (single OSPF recalculation)
+    net.add_links_from(all_links).unwrap();
+
+    // Add SCION link metadata (these are just HashMap insertions, already efficient)
+    for link in scion_links {
+        net.add_scion_link(link.r1, link.r2, link.link_type).unwrap();
+    }
 
     Topology {
         isd1_core1,
@@ -219,13 +240,15 @@ fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>
 }
 
 /// Create an AS with specified number of border routers
+/// Returns (routers, internal_links) - links are collected for bulk creation
 fn create_as(
     net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
     isd_as: IsdAs,
     num_border_routers: usize,
     is_core: bool,
-) -> Vec<RouterId> {
+) -> (Vec<RouterId>, Vec<(RouterId, RouterId)>) {
     let mut routers = Vec::new();
+    let mut internal_links = Vec::new();
 
     // Create border routers
     for i in 0..num_border_routers {
@@ -241,63 +264,62 @@ fn create_as(
         net.enable_scion_router(router, isd_as, is_core).unwrap();
     }
 
-    // Add internal links between border routers (full mesh)
+    // Collect internal links between border routers (full mesh) - don't add yet
     for i in 0..routers.len() {
         for j in (i + 1)..routers.len() {
-            net.add_link(routers[i], routers[j]).unwrap();
+            internal_links.push((routers[i], routers[j]));
         }
     }
 
-    routers
+    (routers, internal_links)
 }
 
-/// Add a core link between two ASes
-fn add_core_link(
-    net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
+/// Collect a core link between two ASes (for bulk creation)
+fn collect_core_link(
     as_routers: &HashMap<IsdAs, Vec<RouterId>>,
     as1: IsdAs,
     as2: IsdAs,
     router1_idx: usize,
     router2_idx: usize,
+    all_links: &mut Vec<(RouterId, RouterId)>,
+    scion_links: &mut Vec<ScionLinkInfo>,
 ) {
     let r1 = as_routers[&as1][router1_idx];
     let r2 = as_routers[&as2][router2_idx];
-
-    net.add_link(r1, r2).unwrap();
-    net.add_scion_link(r1, r2, ScionLinkType::Core).unwrap();
+    all_links.push((r1, r2));
+    scion_links.push(ScionLinkInfo { r1, r2, link_type: ScionLinkType::Core });
 }
 
-/// Add a parent-child link
-fn add_child_link(
-    net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
+/// Collect a parent-child link (for bulk creation)
+fn collect_child_link(
     as_routers: &HashMap<IsdAs, Vec<RouterId>>,
     parent: IsdAs,
     child: IsdAs,
     parent_router_idx: usize,
     child_router_idx: usize,
+    all_links: &mut Vec<(RouterId, RouterId)>,
+    scion_links: &mut Vec<ScionLinkInfo>,
 ) {
     let r_parent = as_routers[&parent][parent_router_idx];
     let r_child = as_routers[&child][child_router_idx];
-
-    net.add_link(r_parent, r_child).unwrap();
-    net.add_scion_link(r_parent, r_child, ScionLinkType::Child)
-        .unwrap();
+    all_links.push((r_parent, r_child));
+    scion_links.push(ScionLinkInfo { r1: r_parent, r2: r_child, link_type: ScionLinkType::Child });
 }
 
-/// Add a peering link
-fn add_peer_link(
-    net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
+/// Collect a peering link (for bulk creation)
+fn collect_peer_link(
     as_routers: &HashMap<IsdAs, Vec<RouterId>>,
     as1: IsdAs,
     as2: IsdAs,
     router1_idx: usize,
     router2_idx: usize,
+    all_links: &mut Vec<(RouterId, RouterId)>,
+    scion_links: &mut Vec<ScionLinkInfo>,
 ) {
     let r1 = as_routers[&as1][router1_idx];
     let r2 = as_routers[&as2][router2_idx];
-
-    net.add_link(r1, r2).unwrap();
-    net.add_scion_link(r1, r2, ScionLinkType::Peer).unwrap();
+    all_links.push((r1, r2));
+    scion_links.push(ScionLinkInfo { r1, r2, link_type: ScionLinkType::Peer });
 }
 
 /// Run the beaconing process
@@ -490,6 +512,15 @@ fn query_and_verify_paths(
                         as_path[as_path.len() - 1],
                         as_path.len()
                     );
+                }
+
+                // Show hop fields with interfaces
+                let hop_fields = path.hop_fields();
+                println!("      Hop fields:");
+                for hop in &hop_fields {
+                    let ingress = hop.ingress.map_or("-".to_string(), |i| i.0.to_string());
+                    let egress = hop.egress.map_or("-".to_string(), |e| e.0.to_string());
+                    println!("        {} [in:{}, out:{}]", hop.isd_as, ingress, egress);
                 }
 
                 // Check for peering shortcut

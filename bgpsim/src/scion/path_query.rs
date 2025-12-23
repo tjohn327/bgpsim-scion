@@ -9,6 +9,31 @@ use super::pcb::PeerEntry;
 use super::types::{IsdAs, InterfaceId};
 use std::sync::Arc;
 
+/// Hop information for forwarding
+///
+/// Represents a single hop in a SCION path with the AS identifier
+/// and the ingress/egress interface IDs needed for forwarding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HopInfo {
+    /// The AS at this hop
+    pub isd_as: IsdAs,
+
+    /// Ingress interface ID (where packet enters this AS)
+    /// None for the source AS
+    pub ingress: Option<InterfaceId>,
+
+    /// Egress interface ID (where packet exits this AS)
+    /// None for the destination AS
+    pub egress: Option<InterfaceId>,
+}
+
+impl HopInfo {
+    /// Create a new hop info
+    pub fn new(isd_as: IsdAs, ingress: Option<InterfaceId>, egress: Option<InterfaceId>) -> Self {
+        Self { isd_as, ingress, egress }
+    }
+}
+
 /// Query for paths between two ASes
 ///
 /// This structure represents a request to find paths from a source AS
@@ -248,6 +273,77 @@ impl ScionPath {
         }
 
         path
+    }
+
+    /// Get the full hop fields with ingress/egress interfaces
+    ///
+    /// Returns a vector of HopInfo structs, one per AS hop, containing
+    /// the AS identifier and the ingress/egress interface IDs for forwarding.
+    ///
+    /// For UP segments (traversed in reverse), ingress/egress are swapped
+    /// to reflect the actual packet direction.
+    pub fn hop_fields(&self) -> Vec<HopInfo> {
+        if self.is_intra_as() {
+            return vec![HopInfo::new(self.src, None, None)];
+        }
+
+        let mut hops = Vec::new();
+
+        for (i, seg_ref) in self.segments.iter().enumerate() {
+            let seg = seg_ref.segment();
+            let is_up = matches!(seg_ref, PathSegmentRef::Up(_));
+
+            // Get AS entries from the segment
+            let entries = &seg.pcb.as_entries;
+
+            // For UP segments, we traverse in reverse (from leaf to core)
+            // For DOWN/CORE segments, we traverse forward (as stored)
+            let segment_hops: Vec<HopInfo> = if is_up {
+                // UP: traverse in reverse, swap ingress/egress
+                entries.iter().rev().map(|e| {
+                    HopInfo::new(
+                        e.isd_as,
+                        e.hop_entry.egress,  // egress becomes ingress when reversed
+                        Some(e.hop_entry.ingress),  // ingress becomes egress when reversed
+                    )
+                }).collect()
+            } else {
+                // DOWN/CORE: traverse forward
+                entries.iter().map(|e| {
+                    HopInfo::new(
+                        e.isd_as,
+                        Some(e.hop_entry.ingress),
+                        e.hop_entry.egress,
+                    )
+                }).collect()
+            };
+
+            if i == 0 {
+                // First segment: include all hops
+                hops.extend(segment_hops);
+            } else if !segment_hops.is_empty() {
+                // Subsequent segments: merge junction hop, then add rest
+                // The junction AS appears at the end of the previous segment
+                // and the start of this segment - merge their interfaces
+                if let Some(last_hop) = hops.last_mut() {
+                    // Update the junction hop's egress from this segment's first hop
+                    let junction_hop = &segment_hops[0];
+                    last_hop.egress = junction_hop.egress;
+                }
+                // Add remaining hops (skip junction)
+                hops.extend(segment_hops.into_iter().skip(1));
+            }
+        }
+
+        // Fix up first and last hops
+        if let Some(first) = hops.first_mut() {
+            first.ingress = None; // Source AS has no ingress
+        }
+        if let Some(last) = hops.last_mut() {
+            last.egress = None; // Destination AS has no egress
+        }
+
+        hops
     }
 
     /// Calculate path length with peering shortcut
