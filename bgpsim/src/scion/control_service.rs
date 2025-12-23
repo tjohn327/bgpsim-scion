@@ -501,29 +501,42 @@ impl ScionControlService {
     pub fn propagate_intra_isd_pcbs(
         &mut self,
     ) -> Vec<(IsdAs, Vec<std::sync::Arc<super::pcb::Pcb>>)> {
-        let mut batches = Vec::new();
+        // Collect child interfaces first to avoid borrow conflicts
+        let child_interfaces: Vec<_> = self
+            .interfaces
+            .iter()
+            .filter(|(_, info)| info.link_type == ScionLinkType::Child)
+            .map(|(id, info)| (*id, info.remote_as))
+            .collect();
 
-        // For each child interface
-        for (iface_id, iface_info) in &self.interfaces {
-            if iface_info.link_type != ScionLinkType::Child {
-                continue;
-            }
+        if child_interfaces.is_empty() {
+            return Vec::new();
+        }
 
+        // For non-core ASes: select best PCBs ONCE (same selection for all children)
+        // This avoids O(children * n log n) sorting, making it O(n log n + children * n)
+        let selected_pcbs = if !self.is_core {
+            self.select_best_pcbs(50) // ≤50 per child (§3.4.1)
+        } else {
+            Vec::new() // Core ASes originate, don't select
+        };
+
+        let mut batches = Vec::with_capacity(child_interfaces.len());
+
+        for (iface_id, remote_as) in child_interfaces {
             let pcbs = if self.is_core {
                 // Core AS: originate one PCB per child interface
-                vec![self.originate_pcb(*iface_id, iface_info.remote_as)]
+                vec![self.originate_pcb(iface_id, remote_as)]
             } else {
-                // Non-core AS: select and extend received PCBs
-                let selected = self.select_best_pcbs(50); // ≤50 per child (§3.4.1)
-
-                selected
-                    .into_iter()
-                    .map(|pcb| self.extend_pcb_intra_isd(pcb, *iface_id, iface_info.remote_as))
+                // Non-core AS: extend the pre-selected PCBs for this child
+                selected_pcbs
+                    .iter()
+                    .map(|pcb| self.extend_pcb_intra_isd(pcb.clone(), iface_id, remote_as))
                     .collect()
             };
 
             if !pcbs.is_empty() {
-                batches.push((iface_info.remote_as, pcbs));
+                batches.push((remote_as, pcbs));
             }
         }
 
@@ -543,7 +556,7 @@ impl ScionControlService {
             }
 
             // If beacon store is empty, originate PCBs
-            let pcbs = if self.beacon_store.get_all().count() == 0 {
+            let pcbs = if self.beacon_store.is_empty() {
                 // Originate one PCB for this neighbor
                 vec![self.originate_pcb(*iface_id, iface_info.remote_as)]
             } else {

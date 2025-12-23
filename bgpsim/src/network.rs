@@ -1516,8 +1516,10 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        // Collect all PCBs grouped by destination
-        let mut by_destination: HashMap<IsdAs, Vec<Arc<crate::scion::Pcb>>> = HashMap::new();
+        // Pre-allocate with estimated capacity (each AS typically has 1-3 children)
+        let estimated_destinations = source_ases.len() * 2;
+        let mut by_destination: HashMap<IsdAs, Vec<Arc<crate::scion::Pcb>>> =
+            HashMap::with_capacity(estimated_destinations);
 
         for &src_as in source_ases {
             let control_service = self
@@ -1537,7 +1539,7 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         }
 
         // Process all PCBs for each destination in one batch
-        let mut receivers = std::collections::HashSet::new();
+        let mut receivers = std::collections::HashSet::with_capacity(by_destination.len());
 
         for (dst_as, pcbs) in by_destination {
             let control_service = self
@@ -1609,8 +1611,10 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        // Collect all PCBs grouped by destination
-        let mut by_destination: HashMap<IsdAs, Vec<Arc<crate::scion::Pcb>>> = HashMap::new();
+        // Pre-allocate with estimated capacity (core mesh: each core has ~2-4 neighbors)
+        let estimated_destinations = core_ases.len() * 3;
+        let mut by_destination: HashMap<IsdAs, Vec<Arc<crate::scion::Pcb>>> =
+            HashMap::with_capacity(estimated_destinations);
 
         for &src_as in core_ases {
             let control_service = self
@@ -1634,7 +1638,7 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         }
 
         // Process all PCBs for each destination in one batch
-        let mut receivers = std::collections::HashSet::new();
+        let mut receivers = std::collections::HashSet::with_capacity(by_destination.len());
 
         for (dst_as, pcbs) in by_destination {
             let control_service = self
