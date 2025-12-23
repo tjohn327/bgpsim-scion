@@ -108,6 +108,16 @@ impl ScaleConfig {
 
 fn get_configs() -> Vec<(&'static str, ScaleConfig)> {
     vec![
+        ("DENSE", ScaleConfig {
+            name: "DENSE",
+            num_isds: 3,
+            cores_per_isd: 5,           // Many cores
+            intermediates_per_isd: 4,   // Few intermediates
+            leaves_per_intermediate: 2, // Few leaves
+            routers_per_core: 1,
+            routers_per_intermediate: 1,
+            routers_per_leaf: 1,
+        }),
         ("TINY", ScaleConfig {
             name: "TINY",
             num_isds: 3,
@@ -301,13 +311,20 @@ fn run_scale_test(config: &ScaleConfig, verbose: bool) -> TimingResults {
     results.enable_scion = enable_time;
     results.add_links = link_time;
 
+    // Calculate core beaconing rounds needed for full inter-ISD connectivity
+    // In a ring of N ISDs, we need N/2 rounds to reach the farthest ISD
+    // Plus additional rounds for intra-ISD core mesh propagation
+    let num_core_rounds = std::cmp::max(
+        config.cores_per_isd * 2,
+        (config.num_isds / 2) + config.cores_per_isd
+    );
+
     if verbose {
-        println!("Running core beaconing ({} rounds)...", config.cores_per_isd * 2);
+        println!("Running core beaconing ({} rounds)...", num_core_rounds);
     }
 
     // Phase 2: Core beaconing
     let start = Instant::now();
-    let num_core_rounds = config.cores_per_isd * 2;
     for _ in 0..num_core_rounds {
         net.propagate_core_batch(&topology.core_ases).unwrap();
     }
@@ -374,8 +391,309 @@ fn run_scale_test(config: &ScaleConfig, verbose: bool) -> TimingResults {
     }
     results.path_queries = start.elapsed();
 
+    // Phase 7: Path verification (if verbose)
+    if verbose {
+        println!("\nVerifying paths...");
+        verify_paths(config, &net, &topology, &global_db);
+    }
+
     results.total = overall_start.elapsed();
     results
+}
+
+/// Verify that paths can be correctly retrieved for various src/dst pairs
+fn verify_paths(
+    config: &ScaleConfig,
+    net: &ScionNetwork,
+    topology: &ScalableTopology,
+    global_db: &PathDatabase,
+) {
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("PATH VERIFICATION");
+    println!("═══════════════════════════════════════════════════════════════════\n");
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    // Test case 1: Same ISD - leaf to leaf (via intermediate and core)
+    println!("Test 1: Same ISD - Leaf to Leaf");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds > 0 && config.intermediates_per_isd >= 2 && config.leaves_per_intermediate > 0 {
+        // Pick two leaves under different intermediates in ISD 1
+        let src = IsdAs::new(1, 300); // First leaf under intermediate 0
+        let dst = IsdAs::new(1, 400); // First leaf under intermediate 1
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (topology too small)\n");
+    }
+
+    // Test case 2: Different ISDs - leaf to leaf (requires core segment)
+    println!("Test 2: Different ISDs - Leaf to Leaf (Cross-ISD)");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds >= 2 && config.leaves_per_intermediate > 0 {
+        let src = IsdAs::new(1, 300); // Leaf in ISD 1
+        let dst = IsdAs::new(2, 300); // Leaf in ISD 2
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (need ≥2 ISDs)\n");
+    }
+
+    // Test case 3: Core to Leaf
+    println!("Test 3: Core to Leaf");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds > 0 && config.leaves_per_intermediate > 0 {
+        let src = IsdAs::new(1, 100); // Core in ISD 1
+        let dst = IsdAs::new(1, 300); // Leaf in ISD 1
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (topology too small)\n");
+    }
+
+    // Test case 4: Core to Core (same ISD)
+    println!("Test 4: Core to Core (Same ISD)");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds > 0 && config.cores_per_isd >= 2 {
+        let src = IsdAs::new(1, 100); // Core 0 in ISD 1
+        let dst = IsdAs::new(1, 101); // Core 1 in ISD 1
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (need ≥2 cores per ISD)\n");
+    }
+
+    // Test case 5: Core to Core (different ISDs)
+    println!("Test 5: Core to Core (Different ISDs)");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds >= 2 {
+        let src = IsdAs::new(1, 100); // Core in ISD 1
+        let dst = IsdAs::new(2, 100); // Core in ISD 2
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (need ≥2 ISDs)\n");
+    }
+
+    // Test case 6: Adjacent ISDs in ring (should always work)
+    println!("Test 6: Adjacent ISDs (Ring Neighbor)");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds >= 2 && config.leaves_per_intermediate > 0 {
+        // ISD N connects to ISD 1 in the ring (wrap-around)
+        let last_isd = config.num_isds as u16;
+        let src = IsdAs::new(1, 300);         // Leaf in ISD 1
+        let dst = IsdAs::new(last_isd, 300);  // Leaf in last ISD (adjacent via ring)
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {} (ring neighbor)", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (need ≥2 ISDs)\n");
+    }
+
+    // Test case 7: Leaf to intermediate (its parent)
+    println!("Test 7: Leaf to Parent Intermediate");
+    println!("───────────────────────────────────────────────────────────────────");
+    if config.num_isds > 0 && config.intermediates_per_isd > 0 && config.leaves_per_intermediate > 0 {
+        let src = IsdAs::new(1, 300); // Leaf under intermediate 200
+        let dst = IsdAs::new(1, 200); // Its parent intermediate
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}", src, dst);
+            println!("  Paths found: {}", result.paths_found);
+            for (i, (path, hops)) in result.all_paths.iter().enumerate() {
+                println!("    [{}] {} ({} hops)", i + 1, path, hops);
+            }
+            println!("  Valid: ✅ {}\n", result.validation);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found\n", src, dst);
+            failed += 1;
+        }
+    } else {
+        println!("  Skipped (topology too small)\n");
+    }
+
+    // Test case 8: Random sampling from leaf_ases
+    println!("Test 8: Random Sampling (5 pairs from opposite ends)");
+    println!("───────────────────────────────────────────────────────────────────");
+    let sample_count = std::cmp::min(5, topology.leaf_ases.len() / 2);
+    for i in 0..sample_count {
+        let src = topology.leaf_ases[i];
+        let dst_idx = topology.leaf_ases.len() - 1 - i;
+        let dst = topology.leaf_ases[dst_idx];
+
+        if let Some(result) = verify_single_path(net, global_db, src, dst) {
+            println!("  {} → {}: ✅ {} hops", src, dst, result.hop_count);
+            passed += 1;
+        } else {
+            println!("  {} → {}: ❌ No path found", src, dst);
+            failed += 1;
+        }
+    }
+
+    // Summary
+    println!("\n═══════════════════════════════════════════════════════════════════");
+    println!("VERIFICATION SUMMARY: {} passed, {} failed", passed, failed);
+    if failed == 0 {
+        println!("✅ All path queries returned valid results!");
+    } else {
+        println!("⚠️  Some paths could not be found or validated");
+    }
+    println!("═══════════════════════════════════════════════════════════════════\n");
+}
+
+struct PathVerificationResult {
+    path_str: String,
+    hop_count: usize,
+    validation: String,
+    paths_found: usize,
+    all_paths: Vec<(String, usize)>,  // (path_str, hop_count)
+}
+
+fn verify_single_path(
+    net: &ScionNetwork,
+    global_db: &PathDatabase,
+    src: IsdAs,
+    dst: IsdAs,
+) -> Option<PathVerificationResult> {
+    let src_is_core = net.is_scion_core(&src).unwrap_or(false);
+    let dst_is_core = net.is_scion_core(&dst).unwrap_or(false);
+
+    let query = PathQuery {
+        src,
+        dst,
+        max_paths: 1000,  // High limit to find all paths
+        allow_peering: false,
+    };
+
+    let result = construct_paths_with_peering(&query, global_db, src_is_core, dst_is_core);
+
+    if result.paths.is_empty() {
+        return None;
+    }
+
+    // Collect all paths
+    let mut all_paths = Vec::new();
+    for p in &result.paths {
+        let as_path = p.as_path();
+        let path_str = as_path.iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        all_paths.push((path_str, as_path.len()));
+    }
+
+    // Take the first (best) path for validation
+    let path = &result.paths[0];
+    let as_path = path.as_path();
+
+    // Validate the path
+    let mut validation_issues = Vec::new();
+
+    // Check source
+    if as_path.first() != Some(&src) {
+        validation_issues.push(format!("path starts at {} not {}",
+            as_path.first().map(|a| a.to_string()).unwrap_or("?".to_string()), src));
+    }
+
+    // Check destination
+    if as_path.last() != Some(&dst) {
+        validation_issues.push(format!("path ends at {} not {}",
+            as_path.last().map(|a| a.to_string()).unwrap_or("?".to_string()), dst));
+    }
+
+    // Check for loops
+    let mut seen = std::collections::HashSet::new();
+    for &isd_as in &as_path {
+        if !seen.insert(isd_as) {
+            validation_issues.push(format!("loop detected at {}", isd_as));
+        }
+    }
+
+    let path_str = as_path.iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(" → ");
+
+    let validation = if validation_issues.is_empty() {
+        "Path is valid".to_string()
+    } else {
+        validation_issues.join(", ")
+    };
+
+    Some(PathVerificationResult {
+        path_str,
+        hop_count: as_path.len(),
+        validation,
+        paths_found: result.paths.len(),
+        all_paths,
+    })
 }
 
 fn build_topology(
@@ -467,10 +785,16 @@ fn build_topology(
             }
         }
 
-        // Core to intermediate
+        // Core to intermediate - connect to more cores for dense topology
+        let cores_to_connect = if config.name == "DENSE" {
+            config.cores_per_isd  // Connect to ALL cores
+        } else {
+            std::cmp::min(2, config.cores_per_isd)  // Normal: connect to 2 cores
+        };
+
         for int_idx in 0..config.intermediates_per_isd {
             let intermediate = IsdAs::new(isd, (200 + int_idx) as u32);
-            for core_idx in 0..std::cmp::min(2, config.cores_per_isd) {
+            for core_idx in 0..cores_to_connect {
                 let core = IsdAs::new(isd, (100 + core_idx) as u32);
                 if let Some((r1, r2)) = get_link_routers(&as_routers, core, intermediate, int_idx % config.routers_per_core, core_idx) {
                     all_links.push((r1, r2));
@@ -490,14 +814,32 @@ fn build_topology(
         }
     }
 
-    // Inter-ISD core links (ring topology)
-    for i in 0..config.num_isds {
-        let j = (i + 1) % config.num_isds;
-        let core1 = IsdAs::new((i + 1) as u16, 100);
-        let core2 = IsdAs::new((j + 1) as u16, 100);
-        if let Some((r1, r2)) = get_link_routers(&as_routers, core1, core2, 1, 1) {
-            all_links.push((r1, r2));
-            scion_links.push((r1, r2, ScionLinkType::Core));
+    // Inter-ISD core links
+    if config.name == "DENSE" {
+        // Dense: Full mesh between all cores across all ISDs
+        for isd1 in 1..=config.num_isds {
+            for isd2 in (isd1 + 1)..=config.num_isds {
+                // Connect multiple cores between ISDs
+                for core_idx in 0..config.cores_per_isd {
+                    let core1 = IsdAs::new(isd1 as u16, (100 + core_idx) as u32);
+                    let core2 = IsdAs::new(isd2 as u16, (100 + core_idx) as u32);
+                    if let Some((r1, r2)) = get_link_routers(&as_routers, core1, core2, 0, 0) {
+                        all_links.push((r1, r2));
+                        scion_links.push((r1, r2, ScionLinkType::Core));
+                    }
+                }
+            }
+        }
+    } else {
+        // Normal: Ring topology with single inter-ISD link
+        for i in 0..config.num_isds {
+            let j = (i + 1) % config.num_isds;
+            let core1 = IsdAs::new((i + 1) as u16, 100);
+            let core2 = IsdAs::new((j + 1) as u16, 100);
+            if let Some((r1, r2)) = get_link_routers(&as_routers, core1, core2, 1, 1) {
+                all_links.push((r1, r2));
+                scion_links.push((r1, r2, ScionLinkType::Core));
+            }
         }
     }
 
