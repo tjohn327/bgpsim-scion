@@ -177,6 +177,23 @@ impl PathDatabase {
         }
     }
 
+    /// Create a new path database with pre-allocated capacity
+    ///
+    /// Use this when you know approximately how many segments will be added.
+    /// Avoids reallocations during bulk insertion.
+    pub fn with_capacity(up: usize, down: usize, core: usize) -> Self {
+        Self {
+            up_segments: Vec::with_capacity(up),
+            up_by_dst: HashMap::with_capacity(up),
+            down_segments: Vec::with_capacity(down),
+            down_by_src: HashMap::with_capacity(down),
+            down_by_dst: HashMap::with_capacity(down),
+            core_segments: Vec::with_capacity(core),
+            core_by_src: HashMap::with_capacity(core),
+            core_by_pair: HashMap::with_capacity(core),
+        }
+    }
+
     /// Add a path segment to the database
     pub fn add_segment(&mut self, segment: Arc<PathSegment>) {
         match segment.segment_type {
@@ -277,7 +294,9 @@ impl PathDatabase {
             .unwrap_or_default()
     }
 
-    /// Get all segments (of any type)
+    /// Get all segments (of any type) - allocates a new Vec
+    ///
+    /// For bulk operations, prefer `iter_all()` to avoid allocation.
     pub fn get_all(&self) -> Vec<Arc<PathSegment>> {
         self.up_segments
             .iter()
@@ -285,6 +304,33 @@ impl PathDatabase {
             .chain(self.core_segments.iter())
             .cloned()
             .collect()
+    }
+
+    /// Iterate over all segments without allocation
+    ///
+    /// More efficient than `get_all()` for bulk operations since it
+    /// doesn't allocate a new Vec.
+    pub fn iter_all(&self) -> impl Iterator<Item = &Arc<PathSegment>> {
+        self.up_segments
+            .iter()
+            .chain(self.down_segments.iter())
+            .chain(self.core_segments.iter())
+    }
+
+    /// Extend this database with all segments from another database
+    ///
+    /// More efficient than iterating and calling add_segment() individually
+    /// because it avoids intermediate allocations.
+    pub fn extend_from(&mut self, other: &PathDatabase) {
+        // Pre-extend capacity
+        self.up_segments.reserve(other.up_segments.len());
+        self.down_segments.reserve(other.down_segments.len());
+        self.core_segments.reserve(other.core_segments.len());
+
+        // Add all segments (indexes are rebuilt automatically)
+        for segment in other.iter_all() {
+            self.add_segment(segment.clone());
+        }
     }
 
     /// Get total number of segments

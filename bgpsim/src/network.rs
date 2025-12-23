@@ -1661,6 +1661,149 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
 
         Ok(receivers)
     }
+
+    /// Batch segment registration for all ASes at once (Batch API)
+    ///
+    /// Registers path segments for all ASes in a single operation:
+    /// - Non-core ASes: register up segments locally, send down segments to cores
+    /// - Core ASes: register core segments locally
+    ///
+    /// # Efficiency
+    ///
+    /// This method is more efficient than individual `RegistrationTimeout` events:
+    /// - **No Event allocation**: Segments transferred directly
+    /// - **Grouped by core AS**: Single HashMap lookup per core destination
+    /// - **Single pass**: All registrations in one call
+    ///
+    /// # Arguments
+    ///
+    /// * `all_ases` - Slice of all ASes to register segments for
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Register segments for all ASes in one call
+    /// net.register_segments_batch(&all_ases)?;
+    /// ```
+    pub fn register_segments_batch(
+        &mut self,
+        all_ases: &[crate::scion::IsdAs],
+    ) -> Result<(), NetworkError> {
+        use crate::scion::IsdAs;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Phase 1: Collect all down segments grouped by destination core AS
+        // Also register up segments (non-core) and core segments (core) locally
+        let estimated_cores = all_ases.len() / 5; // Rough estimate: 1 core per 5 ASes
+        let mut down_segments_by_core: HashMap<IsdAs, Vec<Arc<crate::scion::PathSegment>>> =
+            HashMap::with_capacity(estimated_cores);
+
+        for &isd_as in all_ases {
+            let control_service = self
+                .scion_services
+                .get_mut(&isd_as)
+                .ok_or_else(|| NetworkError::ScionError(format!(
+                    "SCION control service not found for AS {:?}",
+                    isd_as
+                )))?;
+
+            if control_service.is_core {
+                // Core AS: register core segments locally
+                control_service.register_core_segments();
+            } else {
+                // Non-core AS: register up segments locally
+                control_service.register_up_segments();
+
+                // Collect down segments to send to cores
+                let batches = control_service.register_down_segments();
+                for (core_as, segments) in batches {
+                    down_segments_by_core
+                        .entry(core_as)
+                        .or_default()
+                        .extend(segments);
+                }
+            }
+        }
+
+        // Phase 2: Deliver all down segments to core ASes
+        for (core_as, segments) in down_segments_by_core {
+            let control_service = self
+                .scion_services
+                .get_mut(&core_as)
+                .ok_or_else(|| NetworkError::ScionError(format!(
+                    "SCION control service not found for core AS {:?}",
+                    core_as
+                )))?;
+
+            // Validate and store down segments
+            for segment in segments {
+                if control_service.validate_down_segment(&segment) {
+                    control_service.path_db.add_segment(segment);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Build a global path database combining segments from all ASes (Batch API)
+    ///
+    /// This simulates a centralized path segment service by collecting
+    /// all registered segments from all ASes into a single database.
+    ///
+    /// # Efficiency
+    ///
+    /// More efficient than manual iteration:
+    /// - Pre-calculates total capacity to avoid reallocations
+    /// - Uses `iter_all()` to avoid intermediate Vec allocations
+    /// - Single pass over all ASes
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let global_db = net.build_global_path_db(&all_ases)?;
+    /// let paths = construct_paths(&query, &global_db);
+    /// ```
+    pub fn build_global_path_db(
+        &self,
+        all_ases: &[crate::scion::IsdAs],
+    ) -> Result<crate::scion::PathDatabase, NetworkError> {
+        // First pass: count total segments for capacity pre-allocation
+        let mut total_up = 0;
+        let mut total_down = 0;
+        let mut total_core = 0;
+
+        for &isd_as in all_ases {
+            let control_service = self
+                .scion_services
+                .get(&isd_as)
+                .ok_or_else(|| NetworkError::ScionError(format!(
+                    "SCION control service not found for AS {:?}",
+                    isd_as
+                )))?;
+
+            let (up, down, core) = control_service.path_db.segment_counts();
+            total_up += up;
+            total_down += down;
+            total_core += core;
+        }
+
+        // Create database with pre-allocated capacity
+        let mut global_db = crate::scion::PathDatabase::with_capacity(
+            total_up,
+            total_down,
+            total_core,
+        );
+
+        // Second pass: add all segments (no intermediate allocations)
+        for &isd_as in all_ases {
+            let control_service = &self.scion_services[&isd_as];
+            global_db.extend_from(&control_service.path_db);
+        }
+
+        Ok(global_db)
+    }
 }
 
 impl<P: Prefix, Q: EventQueue<P>> Network<P, Q, GlobalOspf> {

@@ -128,5 +128,6 @@ mod test_scion_phase2;
 mod test_scion_phase3;
 mod test_scion_phase4;
 mod test_scion_example;
+mod test_scion_scalability;
 #[cfg(feature = "topology_zoo")]
 mod test_topology_zoo;

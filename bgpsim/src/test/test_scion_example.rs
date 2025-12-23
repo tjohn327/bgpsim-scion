@@ -9,7 +9,7 @@
 // - Full beaconing and path segment construction
 // - Path lookup between various source/destination pairs
 
-use crate::event::{BasicEventQueue, Event};
+use crate::event::BasicEventQueue;
 use crate::network::Network;
 use crate::scion::*;
 use crate::types::{RouterId, SimplePrefix};
@@ -312,17 +312,12 @@ fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
         net.propagate_core_batch(&topology.core_ases).unwrap();
     }
 
-    // Cores register core segments
-    println!("  Core beacon stores before registration:");
+    // Print core beacon store stats (for debugging)
+    println!("  Core beacon stores after core beaconing:");
     for &core_as in &topology.core_ases {
         let cs = &net.scion_services[&core_as];
         let beacon_count = cs.beacon_store.get_all().count();
         println!("    {}: {} PCBs in beacon store", core_as, beacon_count);
-    }
-
-    for &core_as in &topology.core_ases {
-        let event = Event::scion((), core_as, core_as, ScionEvent::RegistrationTimeout);
-        net.handle_scion_event(event).unwrap();
     }
 
     // Phase 2: Intra-ISD beaconing (cores propagate to children)
@@ -344,19 +339,11 @@ fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
     // Phase 3: Path segment registration
     println!("  Phase 3: Segment registration...");
 
-    // Non-core ASes register segments
-    for &isd_as in &topology.all_ases {
-        let cs = &net.scion_services[&isd_as];
-        if !cs.is_core {
-            let event = Event::scion((), isd_as, isd_as, ScionEvent::RegistrationTimeout);
-            let (_, events) = net.handle_scion_event(event).unwrap();
-
-            // Process down segment registrations at cores
-            for event in events {
-                net.handle_scion_event(event).unwrap();
-            }
-        }
-    }
+    // Use batch registration API for efficiency:
+    // - Registers up segments (non-core) and core segments (core) locally
+    // - Groups down segments by destination core AS
+    // - Delivers all down segments in one pass
+    net.register_segments_batch(&topology.all_ases).unwrap();
 }
 
 /// Print statistics about registered segments
@@ -389,17 +376,10 @@ fn build_global_path_db(
     net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
     topology: &Topology,
 ) -> PathDatabase {
-    let mut global_db = PathDatabase::new();
-
-    // Collect all segments from all ASes
-    for &isd_as in &topology.all_ases {
-        let cs = &net.scion_services[&isd_as];
-        for segment in cs.path_db.get_all() {
-            global_db.add_segment(segment);
-        }
-    }
-
-    global_db
+    // Use efficient batch API:
+    // - Pre-allocates capacity based on total segment counts
+    // - Uses iter_all() to avoid intermediate Vec allocations
+    net.build_global_path_db(&topology.all_ases).unwrap()
 }
 
 /// Query paths and verify they work correctly
