@@ -5,10 +5,14 @@
 
 use crate::event::BasicEventQueue;
 use crate::network::Network;
+use crate::ospf::MinimalOspf;
 use crate::scion::*;
 use crate::types::{RouterId, SimplePrefix};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+/// Type alias for SCION network using MinimalOspf (no SPT computation overhead)
+type ScionNetwork = Network<SimplePrefix, BasicEventQueue<SimplePrefix>, MinimalOspf>;
 
 /// Configuration for scalability tests
 struct ScaleConfig {
@@ -181,8 +185,8 @@ struct ScionLinkInfo {
 /// Returns (network, topology, create_as_time, add_links_time)
 fn build_scalable_topology(
     config: &ScaleConfig,
-) -> (Network<SimplePrefix, BasicEventQueue<SimplePrefix>>, ScalableTopology, Duration, Duration) {
-    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>> = Network::default();
+) -> (ScionNetwork, ScalableTopology, Duration, Duration) {
+    let mut net: ScionNetwork = Network::default();
     let mut as_routers: HashMap<IsdAs, Vec<RouterId>> = HashMap::new();
     let mut core_ases = Vec::new();
     let mut intermediate_ases = Vec::new();
@@ -331,7 +335,7 @@ fn get_link_routers(
 /// Create an AS with specified number of border routers
 /// Returns routers and internal links (deferred for bulk creation)
 fn create_as(
-    net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
+    net: &mut ScionNetwork,
     isd_as: IsdAs,
     num_border_routers: usize,
     is_core: bool,

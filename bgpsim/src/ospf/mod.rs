@@ -20,6 +20,7 @@
 pub mod global;
 mod iterator;
 pub mod local;
+pub mod minimal;
 pub use iterator::*;
 use petgraph::{prelude::StableGraph, Directed};
 
@@ -46,6 +47,7 @@ use local::OspfEvent;
 
 pub use global::GlobalOspf;
 pub use local::LocalOspf;
+pub use minimal::MinimalOspf;
 
 use self::global::GlobalOspfProcess;
 

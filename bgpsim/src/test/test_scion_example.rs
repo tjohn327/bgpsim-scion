@@ -11,16 +11,21 @@
 
 use crate::event::BasicEventQueue;
 use crate::network::Network;
+use crate::ospf::MinimalOspf;
 use crate::scion::*;
 use crate::types::{RouterId, SimplePrefix};
 use std::collections::HashMap;
+
+/// Type alias for SCION network using MinimalOspf (no SPT computation overhead)
+type ScionNetwork = Network<SimplePrefix, BasicEventQueue<SimplePrefix>, MinimalOspf>;
 
 #[test]
 fn test_multi_isd_topology() {
     println!("\n=== SCION Multi-ISD Topology Test ===\n");
 
-    // Create network
-    let mut net: Network<SimplePrefix, BasicEventQueue<SimplePrefix>> = Network::default();
+    // Create network with MinimalOspf for efficient SCION simulation
+    // MinimalOspf assumes full mesh within AS (no SPT computation overhead)
+    let mut net: ScionNetwork = Network::default();
 
     println!("Step 1: Building topology...");
     let topology = build_topology(&mut net);
@@ -80,7 +85,7 @@ struct ScionLinkInfo {
 }
 
 /// Build the complete SCION topology
-fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>) -> Topology {
+fn build_topology(net: &mut ScionNetwork) -> Topology {
     // Define AS identifiers
     let isd1_core1 = IsdAs::new(1, 100);
     let isd1_core2 = IsdAs::new(1, 101);
@@ -242,7 +247,7 @@ fn build_topology(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>
 /// Create an AS with specified number of border routers
 /// Returns (routers, internal_links) - links are collected for bulk creation
 fn create_as(
-    net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
+    net: &mut ScionNetwork,
     isd_as: IsdAs,
     num_border_routers: usize,
     is_core: bool,
@@ -323,7 +328,7 @@ fn collect_peer_link(
 }
 
 /// Run the beaconing process
-fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>, topology: &Topology) {
+fn run_beaconing(net: &mut ScionNetwork, topology: &Topology) {
     // Phase 1: Core beaconing (cores exchange beacons)
     println!("  Phase 1: Core beaconing...");
 
@@ -369,10 +374,7 @@ fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
 }
 
 /// Print statistics about registered segments
-fn print_segment_stats(
-    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
-    topology: &Topology,
-) {
+fn print_segment_stats(net: &ScionNetwork, topology: &Topology) {
     println!("\n  Segment Statistics:");
 
     for &isd_as in &topology.all_ases {
@@ -394,10 +396,7 @@ fn print_segment_stats(
 
 /// Build a global path database combining segments from all ASes
 /// This simulates a centralized path segment service
-fn build_global_path_db(
-    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
-    topology: &Topology,
-) -> PathDatabase {
+fn build_global_path_db(net: &ScionNetwork, topology: &Topology) -> PathDatabase {
     // Use efficient batch API:
     // - Pre-allocates capacity based on total segment counts
     // - Uses iter_all() to avoid intermediate Vec allocations
@@ -405,10 +404,7 @@ fn build_global_path_db(
 }
 
 /// Query paths and verify they work correctly
-fn query_and_verify_paths(
-    net: &Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
-    topology: &Topology,
-) -> usize {
+fn query_and_verify_paths(net: &ScionNetwork, topology: &Topology) -> usize {
     // Build global path database (simulates path segment service)
     let global_db = build_global_path_db(net, topology);
     println!("  Global path database: {} total segments\n", global_db.get_all().len());

@@ -189,6 +189,11 @@ impl OspfCoordinator for GlobalOspfCoordinator {
 
 // some getter functions on the global OSPF oracle
 impl GlobalOspfCoordinator {
+    /// Get the ASN of this coordinator.
+    pub fn get_asn(&self) -> ASN {
+        self.asn
+    }
+
     /// Get a reference to the network-wide RIB.
     pub fn get_ribs(&self) -> &HashMap<RouterId, HashMap<RouterId, OspfRibEntry>> {
         &self.ribs
