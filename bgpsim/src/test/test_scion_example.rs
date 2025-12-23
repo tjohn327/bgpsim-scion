@@ -305,24 +305,11 @@ fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
     // Phase 1: Core beaconing (cores exchange beacons)
     println!("  Phase 1: Core beaconing...");
 
-    // Run multiple rounds to ensure full propagation through the core mesh
+    // Use batch propagation API for efficiency.
+    // Core beaconing requires O(diameter) rounds to fully propagate through the mesh.
+    // Each round: all cores propagate simultaneously, then all receive.
     for _round in 0..topology.core_ases.len() {
-        let mut all_beacon_events = Vec::new();
-
-        // First, all cores originate/propagate (beacon stores start empty in round 0)
-        for &core_as in &topology.core_ases {
-            let event = ScionEvent::BeaconTimeout {
-                interval_type: BeaconIntervalType::Core,
-            };
-            let scion_event = Event::scion((), core_as, core_as, event);
-            let (_, events) = net.handle_scion_event(scion_event).unwrap();
-            all_beacon_events.extend(events);
-        }
-
-        // Then, process all received beacons (ensures all cores originate before any receive)
-        for event in all_beacon_events {
-            net.handle_scion_event(event).unwrap();
-        }
+        net.propagate_core_batch(&topology.core_ases).unwrap();
     }
 
     // Cores register core segments
@@ -341,25 +328,17 @@ fn run_beaconing(net: &mut Network<SimplePrefix, BasicEventQueue<SimplePrefix>>,
     // Phase 2: Intra-ISD beaconing (cores propagate to children)
     println!("  Phase 2: Intra-ISD beaconing...");
 
-    // Run multiple rounds to propagate down the hierarchy (core -> intermediate -> leaf)
-    // 3 levels deep requires at least 3 rounds
-    for round in 0..3 {
-        // All non-core ASes that might have received beacons
-        for &isd_as in &topology.all_ases {
-            let cs = &net.scion_services[&isd_as];
-            if cs.beacon_store.get_all().count() > 0 || cs.is_core {
-                let event = ScionEvent::BeaconTimeout {
-                    interval_type: BeaconIntervalType::IntraIsd,
-                };
-                let scion_event = Event::scion((), isd_as, isd_as, event);
-                let (_, events) = net.handle_scion_event(scion_event).unwrap();
+    // Use batch propagation API for efficiency:
+    // - No Event object allocation
+    // - PCBs grouped by destination (single lookup per destination)
+    // - Level-by-level propagation: Core -> Intermediate -> Leaf
 
-                // Process beacons at children
-                for event in events {
-                    net.handle_scion_event(event).unwrap();
-                }
-            }
-        }
+    let mut current_level: Vec<IsdAs> = topology.core_ases.clone();
+
+    while !current_level.is_empty() {
+        // Batch propagate all ASes at current level, get receivers for next level
+        let next_level = net.propagate_intra_isd_batch(&current_level).unwrap();
+        current_level = next_level.into_iter().collect();
     }
 
     // Phase 3: Path segment registration
