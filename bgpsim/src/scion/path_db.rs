@@ -10,6 +10,7 @@
 
 use super::pcb::Pcb;
 use super::types::IsdAs;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use std::sync::Arc;
 ///
 /// SCION uses three types of path segments that are combined to form
 /// end-to-end paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SegmentType {
     /// Up segment: from non-core AS to core AS
     Up,
@@ -58,7 +59,7 @@ impl std::fmt::Display for SegmentType {
 /// A path segment is a "snapshot" of a PCB at a given time from a particular
 /// AS's vantage point. It is created by terminating a PCB (setting next_isd_as
 /// and egress to None/0 in the last entry).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathSegment {
     pub segment_type: SegmentType,
     pub pcb: Pcb,
@@ -487,6 +488,83 @@ impl PathDatabase {
             core_count: self.core_segments.len(),
             total_count: self.total_segments(),
         }
+    }
+
+    /// Export the database to a serializable format.
+    ///
+    /// This creates an owned copy of all segments that can be serialized to JSON,
+    /// YAML, or other serde-compatible formats.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let export = db.export();
+    /// let json = serde_json::to_string_pretty(&export)?;
+    /// std::fs::write("path_db.json", json)?;
+    /// ```
+    pub fn export(&self) -> PathDatabaseExport {
+        PathDatabaseExport {
+            up_segments: self.up_segments.iter().map(|s| (**s).clone()).collect(),
+            down_segments: self.down_segments.iter().map(|s| (**s).clone()).collect(),
+            core_segments: self.core_segments.iter().map(|s| (**s).clone()).collect(),
+        }
+    }
+
+    /// Export to JSON string.
+    ///
+    /// Returns the database as a JSON string for easy analysis in Python or other tools.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&self.export())
+    }
+
+    /// Export to JSON and write to file.
+    pub fn to_json_file(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let json = self.to_json().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, json)
+    }
+}
+
+/// Serializable export format for PathDatabase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathDatabaseExport {
+    pub up_segments: Vec<PathSegment>,
+    pub down_segments: Vec<PathSegment>,
+    pub core_segments: Vec<PathSegment>,
+}
+
+impl PathDatabaseExport {
+    /// Load from JSON string
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Load from JSON file
+    pub fn from_json_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        Self::from_json(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    /// Convert back to a PathDatabase
+    pub fn into_database(self) -> PathDatabase {
+        let mut db = PathDatabase::with_capacity(
+            self.up_segments.len(),
+            self.down_segments.len(),
+            self.core_segments.len(),
+        );
+        for seg in self.up_segments {
+            db.add_segment(Arc::new(seg));
+        }
+        for seg in self.down_segments {
+            db.add_segment(Arc::new(seg));
+        }
+        for seg in self.core_segments {
+            db.add_segment(Arc::new(seg));
+        }
+        db
+    }
+
+    /// Get total number of segments
+    pub fn total_segments(&self) -> usize {
+        self.up_segments.len() + self.down_segments.len() + self.core_segments.len()
     }
 }
 

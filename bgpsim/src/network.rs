@@ -701,6 +701,30 @@ impl<P: Prefix, Q: EventQueue<P>, Ospf: OspfImpl> Network<P, Q, Ospf> {
         Ok(())
     }
 
+    /// Get a reference to the SCION control service for the given ISD-AS.
+    ///
+    /// Returns `None` if no control service exists for this AS.
+    pub fn get_scion_service(&self, isd_as: &IsdAs) -> Option<&ScionControlService> {
+        self.scion_services.get(isd_as)
+    }
+
+    /// Get a reference to all SCION control services.
+    pub fn get_scion_services(&self) -> &BTreeMap<IsdAs, ScionControlService> {
+        &self.scion_services
+    }
+
+    /// Get the segment counts for a SCION AS.
+    ///
+    /// Returns (up_segments, down_segments, core_segments), or `None` if AS doesn't exist.
+    pub fn get_scion_segment_counts(&self, isd_as: &IsdAs) -> Option<(usize, usize, usize)> {
+        self.scion_services.get(isd_as).map(|cs| cs.path_db.segment_counts())
+    }
+
+    /// Check if a SCION AS is a core AS.
+    pub fn is_scion_core(&self, isd_as: &IsdAs) -> Option<bool> {
+        self.scion_services.get(isd_as).map(|cs| cs.is_core)
+    }
+
     /// Setup a BGP session between source and target. If `ty` is `None`, then any existing session
     /// will be removed. Otherwise, any existing session will be replaced by the type (whether
     /// target is a client or not).

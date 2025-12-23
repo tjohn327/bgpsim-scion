@@ -4,6 +4,7 @@
 // They accumulate AS entries as they traverse the network during beaconing.
 
 use super::types::*;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Path Construction Beacon
@@ -11,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A PCB accumulates AS entries as it traverses the network. Each AS that
 /// receives a PCB may extend it by appending its own AS entry and forwarding
 /// it to neighbors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pcb {
     pub segment_info: SegmentInfo,
     pub as_entries: Vec<AsEntry>,
@@ -82,7 +83,7 @@ impl Pcb {
 ///
 /// This information is set by the originating AS and remains constant
 /// as the PCB is propagated.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SegmentInfo {
     /// Creation time (seconds since UNIX epoch)
     pub timestamp: i64,
@@ -129,7 +130,7 @@ impl Default for SegmentInfo {
 ///
 /// Each AS entry contains the information needed to forward packets through
 /// that AS in the beaconing direction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsEntry {
     /// ISD-AS number of this AS
     pub isd_as: IsdAs,
@@ -174,7 +175,7 @@ impl AsEntry {
 ///
 /// Specifies ingress and egress interfaces for packet forwarding through an AS.
 /// In the real SCION protocol, hop fields also contain a MAC for validation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct HopEntry {
     /// Ingress interface ID
     pub ingress: InterfaceId,
@@ -227,7 +228,7 @@ impl HopEntry {
 ///
 /// Peering links are not traversed by PCBs directly, but are advertised
 /// in AS entries so that segment combination can use them as shortcuts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerEntry {
     /// ISD-AS of the peer
     pub peer_isd_as: IsdAs,
