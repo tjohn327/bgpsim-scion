@@ -4,4 +4,5 @@ members = [
     "bgpsim-macros",
     "bgpsim",
     "bgpsim-web",
+    "graphtool",
 ]
